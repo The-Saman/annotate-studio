@@ -66,17 +66,6 @@ export function formatDuration(totalSeconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-const RTL_PATTERN = /[֐-ࣿיִ-﷿ﹰ-﻿]/;
-const LTR_PATTERN = /[A-Za-zÀ-ɏ]/;
-
-export function isRtlText(text: string): boolean {
-  for (const char of text) {
-    if (RTL_PATTERN.test(char)) return true;
-    if (LTR_PATTERN.test(char)) return false;
-  }
-  return false;
-}
-
 export function debounce<T extends unknown[]>(fn: (...args: T) => void, delay: number) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const debounced = (...args: T) => {

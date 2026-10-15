@@ -1,15 +1,18 @@
 pub mod ai_json;
+pub mod ai_models;
 pub mod ai_router;
+pub mod ai_turn;
 pub mod analytics;
 pub mod commands;
 pub mod filesystem;
 pub mod paths;
+pub mod search_index;
 pub mod spaced_repetition;
 pub mod state;
 pub mod storage;
 pub mod text;
 
-use commands::{ai, backup, data, files, flashcards};
+use commands::{ai, backup, data, files, flashcards, index, latex};
 use paths::Workspace;
 use state::AppState;
 use tauri::Manager;
@@ -83,6 +86,18 @@ pub fn run() {
             ai::set_default_ai_provider,
             ai::test_ai_provider,
             ai::check_ollama,
+            ai::ai_turn,
+            ai::list_provider_models,
+            ai::set_model_capabilities,
+            index::index_status,
+            index::index_refresh,
+            index::index_document,
+            index::index_get_document,
+            index::search_workspace,
+            index::ocr_cache_get,
+            index::ocr_cache_put,
+            latex::detect_tex_engines,
+            latex::compile_latex,
             backup::export_data,
             backup::import_data,
         ])

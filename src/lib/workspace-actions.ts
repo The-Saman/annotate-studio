@@ -22,7 +22,8 @@ import { useSettings } from '@/store/settings';
 import { toast } from '@/store/toast';
 
 export const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif'];
-export const NOTE_EXTENSIONS = ['md', 'markdown', 'mdx', 'txt', 'text'];
+export const NOTE_EXTENSIONS = ['md', 'markdown', 'mdx', 'txt', 'text', 'tex', 'latex', 'bib', 'lean', 'typ', 'csv'];
+export const LATEX_EXTENSIONS = ['tex', 'latex'];
 export const DOCUMENT_EXTENSIONS = ['docx', 'odt'];
 
 export function resourceTypeFor(file: Pick<StudyFile, 'file_type' | 'name'>): ResourceType | null {
@@ -124,11 +125,13 @@ export async function pickAndImport(kind: 'pdf' | 'image' | 'note' | 'any', at?:
   await importPaths(paths, at);
 }
 
-export async function createNewNote(options: { at?: { x: number; y: number }; content?: string; title?: string; near?: string } = {}) {
+export async function createNewNote(
+  options: { at?: { x: number; y: number }; content?: string; title?: string; near?: string; extension?: string } = {},
+) {
   try {
     const title = options.title?.trim() || 'Untitled';
     const content = options.content ?? `# ${title}\n\n`;
-    const file = await createNote(title, content);
+    const file = await createNote(title, content, options.extension);
     useLibrary.getState().upsert(file);
     useCanvas.getState().openResource(
       { type: 'note', title: displayTitle(file), filePath: file.path },

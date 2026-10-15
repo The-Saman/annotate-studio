@@ -46,8 +46,8 @@ test('parses inline and block math', () => {
   assert.deepEqual(inline[1], { type: 'math', value: 'E = mc^2', display: false });
   const blocks = parseMarkdown('$$\n\\int_0^1 x\\,dx\n$$\n\n$$a+b$$');
   assert.equal(blocks.length, 2);
-  assert.deepEqual(blocks[0], { type: 'math', value: '\\int_0^1 x\\,dx' });
-  assert.deepEqual(blocks[1], { type: 'math', value: 'a+b' });
+  assert.deepEqual(blocks[0], { type: 'math', value: '\\int_0^1 x\\,dx', env: null });
+  assert.deepEqual(blocks[1], { type: 'math', value: 'a+b', env: null });
 });
 
 test('parses fenced code blocks verbatim', () => {
@@ -130,4 +130,54 @@ test('keeps text that follows display math on the same line', () => {
   assert.deepEqual(multi.map((b) => b.type), ['paragraph', 'math', 'paragraph']);
   assert.equal(first(multi, 'math').value, 'a+b');
   assert.equal(inlineText(multi[2].type === 'paragraph' ? multi[2].children : []), 'where a is x');
+});
+
+test('parses LaTeX math delimiters and environments', () => {
+  const inline = parseInline('Text \\(a+b\\) and \\[c\\]');
+  assert.deepEqual(inline[1], { type: 'math', value: 'a+b', display: false });
+  assert.deepEqual(inline[3], { type: 'math', value: 'c', display: true });
+  const blocks = parseMarkdown('\\[\nx = 1\n\\]\n\n\\begin{align}\na &= b \\\\\nc &= d\n\\end{align} after');
+  assert.equal(blocks[0].type, 'math');
+  const align = blocks[1] as Extract<Block, { type: 'math' }>;
+  assert.equal(align.env, 'align');
+  assert.ok(align.value.startsWith('\\begin{align}') && align.value.endsWith('\\end{align}'));
+  assert.equal(inlineText((blocks[2] as Extract<Block, { type: 'paragraph' }>).children), 'after');
+});
+
+test('parses theorem environments, callouts and footnotes', () => {
+  const blocks = parseMarkdown(
+    '\\begin{theorem}[Pythagoras]\\label{thm:p}\nFor right triangles $a^2+b^2=c^2$.\n\\end{theorem}\n\n> [!tip]- Remember\n> Square both sides\n\nSee note[^n].\n\n[^n]: The footnote.',
+  );
+  const env = first(blocks, 'env');
+  assert.equal(env.name, 'theorem');
+  assert.equal(env.label, 'thm:p');
+  assert.equal(inlineText(env.title ?? []), 'Pythagoras');
+  assert.equal(env.children[0].type, 'paragraph');
+  const callout = first(blocks, 'callout');
+  assert.equal(callout.kind, 'tip');
+  assert.equal(callout.fold, 'closed');
+  assert.equal(inlineText(callout.title), 'Remember');
+  const footnote = first(blocks, 'footnoteDef');
+  assert.equal(footnote.id, 'n');
+  const paragraph = blocks.find((b) => b.type === 'paragraph' && inlineText(b.children).startsWith('See')) as Extract<Block, { type: 'paragraph' }>;
+  assert.ok(paragraph.children.some((node) => node.type === 'footnoteRef'));
+});
+
+test('parses highlights, references and citations', () => {
+  const nodes = parseInline('==key== see \\eqref{eq:1} and \\ref{thm:a} \\cite{knuth84,lamport}');
+  assert.equal(nodes[0].type, 'mark');
+  assert.deepEqual(nodes[2], { type: 'ref', key: 'eq:1', style: 'eqref' });
+  assert.deepEqual(nodes[4], { type: 'ref', key: 'thm:a', style: 'ref' });
+  assert.deepEqual(nodes[6], { type: 'cite', keys: ['knuth84', 'lamport'] });
+});
+
+test('keeps macro definitions as their own block', () => {
+  const blocks = parseMarkdown('\\newcommand{\\R}{\\mathbb{R}}\n\\DeclareMathOperator{\\Tr}{Tr}\n\ntext');
+  assert.deepEqual(blocks.map((b) => b.type), ['defs', 'paragraph']);
+});
+
+test('keeps pipes inside math in table cells', () => {
+  const table = first(parseMarkdown('| a | b |\n| - | - |\n| $|x|$ | y |'), 'table');
+  assert.equal(table.rows[0].length, 2);
+  assert.equal(table.rows[0][0][0].type, 'math');
 });

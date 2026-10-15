@@ -15,7 +15,7 @@ The application is built with **Tauri + Rust** and **Next.js**, with local AI at
 Create a study canvas and bring your materials together.
 
 * PDF documents
-* Markdown notes
+* Markdown notes and LaTeX documents
 * Images
 * An AI assistant connected to your study materials
 * Explain concepts step by step
@@ -31,6 +31,32 @@ The assistant can also help you:
 * Answer "why" and "how" questions
 * Create cheat sheets
 * Find contradictions
+
+Hold Ctrl and scroll over a note or PDF to make its text larger or smaller. This can be turned off in Settings.
+
+### Markdown and LaTeX
+
+Write notes in Markdown with LaTeX math, or work with complete LaTeX documents.
+
+* Equations with numbering and references (`\label`, `\eqref`), theorem, definition and proof blocks, callouts and footnotes
+* Your own LaTeX macros, command suggestions and a live preview of the formula you are typing
+* Adjustable formula size, and any formula opens enlarged with a double-click
+* `.tex` documents with a live preview and one-click compilation to PDF (requires TeX Live, MiKTeX or Tectonic)
+* Export of any note to LaTeX
+
+### Persian and right-to-left text
+
+Persian, Arabic and mixed Persian–English text is laid out correctly, line by line in the editor and paragraph by paragraph in the preview. Formulas, code and LaTeX commands stay left-to-right inside Persian sentences, lists and equation numbers use Persian digits, and search treats Persian and Arabic letter forms as the same.
+
+### AI agent
+
+The assistant can work as an agent over your whole workspace. It decides what to search and read, and it can create and edit notes, flashcards and exams. Every change it makes can be undone.
+
+* OCR of scanned PDFs and images with a vision model
+* Turning dozens of files into one structured study booklet
+* A routine model for everyday work and a reasoning model for proofs, papers and hard questions, with "Think deeper" and "Challenge"
+* Turning Lean proofs into natural-language proofs, paraphrasing papers and checking solutions step by step
+* A local search index and running summaries, so large libraries and long conversations keep their context
 
 ### Flashcards
 
@@ -59,6 +85,8 @@ The Motivation page gives you a space to talk with AI about exams, stress, sleep
 Annotate Studio is designed around flexible AI providers.
 
 You can use local AI through **Ollama**, or connect external providers such as **OpenAI**, **Gemini**, and other supported APIs.
+
+When you add a provider, Annotate Studio can fetch its models and detect which ones can read images, use tools or reason.
 
 Your learning workflow does not have to depend on a single provider.
 
@@ -121,12 +149,8 @@ The goal is simple: **use AI to build faster, then make the resulting software g
 
 Still evolving! Some of the things I want to explore next include:
 
-* Professional LaTeX support alongside Markdown for technical and academic writing.
 * Presentation creation, making it possible to turn study materials into structured presentations.
 * Document editing and export, including PPTX and DOCX formats compatible with Microsoft Office and Google Workspace.
-* Better agentic workflows, allowing AI agents to organize, transform, and export study materials more effectively.
-* Deep thinking and argumentation, giving the AI better capabilities for reasoning through complex ideas, evaluating arguments, and challenging conclusions.
-* Efficient long-context management, allowing the application to work effectively with large collections of books, papers, notes, and other study materials without losing important context.
 
 The long-term goal is not simply to add more AI features, but to build a learning environment where AI can genuinely understand, organize, and work with the material you are studying.
 

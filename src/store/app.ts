@@ -6,7 +6,9 @@ export type ChatRequest =
   | { kind: 'draft'; text: string }
   | { kind: 'summarize'; title: string; path?: string; text?: string }
   | { kind: 'explain'; topic: string; context?: string; path?: string }
-  | { kind: 'flashcards'; title: string; text: string; path?: string };
+  | { kind: 'flashcards'; title: string; text: string; path?: string }
+  | { kind: 'walkthrough'; title: string; markdown: string }
+  | { kind: 'agent'; text: string; paths: string[]; send: boolean };
 
 interface AppStore {
   currentView: ViewMode;

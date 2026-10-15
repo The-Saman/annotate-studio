@@ -11,10 +11,24 @@ import { isPromptId, type PromptId } from '@/lib/promptPresets';
 import { parseVisualization, type Visualization } from '@/lib/visualizations';
 
 export type ChatReplay =
+  | { kind: 'agent'; text: string; deep?: boolean; preset?: string }
   | { kind: 'summarize'; title: string; path?: string; text?: string }
   | { kind: 'explain'; topic: string; context?: string; path?: string }
   | { kind: 'flashcards'; instructions?: string; text?: string; path?: string; title?: string; announce?: string }
   | { kind: 'prompt'; preset: PromptId; text?: string; context?: string; path?: string };
+
+export interface ChatStep {
+  id: string;
+  tool: string;
+  label: string;
+  status: 'running' | 'done' | 'error';
+  summary?: string;
+  paths?: string[];
+  undoable?: boolean;
+  undone?: boolean;
+}
+
+export type ChatMode = 'agent' | 'chat' | 'deep' | 'critique';
 
 export interface ChatMessage {
   id: string;
@@ -28,6 +42,28 @@ export interface ChatMessage {
   replay?: ChatReplay;
   error?: boolean;
   stopped?: boolean;
+  steps?: ChatStep[];
+  reasoning?: string;
+  model?: string;
+  mode?: ChatMode;
+  streaming?: boolean;
+  status?: string;
+}
+
+function migrateStep(raw: unknown): ChatStep | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const data = raw as Record<string, unknown>;
+  if (typeof data.label !== 'string') return null;
+  const status = data.status === 'error' ? 'error' : 'done';
+  return {
+    id: typeof data.id === 'string' ? data.id : uid(),
+    tool: typeof data.tool === 'string' ? data.tool : '',
+    label: data.label,
+    status,
+    summary: typeof data.summary === 'string' ? data.summary : undefined,
+    paths: Array.isArray(data.paths) ? data.paths.filter((p): p is string => typeof p === 'string') : undefined,
+    undone: data.undone === true ? true : undefined,
+  };
 }
 
 function optionalString(value: unknown): string | undefined {
@@ -37,6 +73,9 @@ function optionalString(value: unknown): string | undefined {
 function migrateReplay(raw: unknown): ChatReplay | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const data = raw as Record<string, unknown>;
+  if (data.kind === 'agent' && typeof data.text === 'string') {
+    return { kind: 'agent', text: data.text, deep: data.deep === true ? true : undefined, preset: optionalString(data.preset) };
+  }
   if (data.kind === 'summarize' && typeof data.title === 'string') {
     return { kind: 'summarize', title: data.title, path: optionalString(data.path), text: optionalString(data.text) };
   }
@@ -59,6 +98,11 @@ function migrateReplay(raw: unknown): ChatReplay | undefined {
   return undefined;
 }
 
+export interface SessionMemory {
+  summary: string;
+  lastId: string;
+}
+
 export interface ChatSession {
   id: string;
   name: string;
@@ -66,6 +110,7 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   autoNamed: boolean;
+  memory?: SessionMemory;
 }
 
 export interface SessionStore {
@@ -81,6 +126,7 @@ export interface SessionStore {
   clearSession: (id: string) => void;
   appendMessage: (sessionId: string, message: Omit<ChatMessage, 'id' | 'timestamp'> & Partial<Pick<ChatMessage, 'id' | 'timestamp'>>) => string;
   updateMessage: (sessionId: string, messageId: string, patch: Partial<ChatMessage>) => void;
+  setMemory: (sessionId: string, memory: SessionMemory | undefined) => void;
 }
 
 function migrateMessage(raw: unknown): ChatMessage | null {
@@ -109,6 +155,10 @@ function migrateMessage(raw: unknown): ChatMessage | null {
   if (replay) message.replay = replay;
   if (data.error === true) message.error = true;
   if (data.stopped === true) message.stopped = true;
+  if (Array.isArray(data.steps)) message.steps = data.steps.map(migrateStep).filter((step): step is ChatStep => step !== null);
+  if (typeof data.reasoning === 'string' && data.reasoning) message.reasoning = data.reasoning;
+  if (typeof data.model === 'string' && data.model) message.model = data.model;
+  if (data.mode === 'agent' || data.mode === 'chat' || data.mode === 'deep' || data.mode === 'critique') message.mode = data.mode;
   return message;
 }
 
@@ -119,6 +169,9 @@ function migrateSession(raw: unknown, index: number, prefix: string): ChatSessio
     ? data.messages.map(migrateMessage).filter((m): m is ChatMessage => m !== null)
     : [];
   const createdAt = typeof data.createdAt === 'number' ? data.createdAt : Date.now();
+  const memoryRaw = data.memory && typeof data.memory === 'object' ? (data.memory as Record<string, unknown>) : null;
+  const memory =
+    memoryRaw && typeof memoryRaw.summary === 'string' && typeof memoryRaw.lastId === 'string' ? { summary: memoryRaw.summary, lastId: memoryRaw.lastId } : undefined;
   return {
     id: typeof data.id === 'string' && data.id ? data.id : uid(),
     name: typeof data.name === 'string' && data.name.trim() ? data.name : `${prefix} ${index + 1}`,
@@ -126,6 +179,7 @@ function migrateSession(raw: unknown, index: number, prefix: string): ChatSessio
     createdAt,
     updatedAt: typeof data.updatedAt === 'number' ? data.updatedAt : messages[messages.length - 1]?.timestamp ?? createdAt,
     autoNamed: data.autoNamed === true,
+    ...(memory ? { memory } : {}),
   };
 }
 
@@ -199,7 +253,8 @@ function createSessionStore(
           return { sessions, activeId };
         });
       },
-      clearSession: (id) => updateSession(id, (s) => ({ ...s, messages: [], updatedAt: Date.now() })),
+      clearSession: (id) => updateSession(id, (s) => ({ ...s, messages: [], memory: undefined, updatedAt: Date.now() })),
+      setMemory: (sessionId, memory) => updateSession(sessionId, (s) => ({ ...s, memory })),
       appendMessage: (sessionId, input) => {
         const message: ChatMessage = { ...input, id: input.id ?? uid(), timestamp: input.timestamp ?? Date.now() };
         updateSession(sessionId, (s) => {
@@ -224,7 +279,14 @@ function createSessionStore(
 
   store.subscribe((state, previous) => {
     if (!state.hydrated || !previous.hydrated || state.sessions === previous.sessions) return;
-    saver.schedule(state.sessions.filter((s) => s.messages.length > 0 || s.id === state.activeId));
+    saver.schedule(
+      state.sessions
+        .filter((s) => s.messages.length > 0 || s.id === state.activeId)
+        .map((s) => ({
+          ...s,
+          messages: s.messages.map((m) => (m.streaming || m.status ? { ...m, streaming: undefined, status: undefined } : m)),
+        })),
+    );
   });
 
   return store;

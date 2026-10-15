@@ -24,6 +24,7 @@ export interface Resource {
   z: number;
   minimized: boolean;
   maximized: boolean;
+  textZoom?: number;
 }
 
 export interface Workspace {
@@ -166,6 +167,7 @@ function migrateResource(raw: unknown, index: number): Resource | null {
     z: index + 1,
     minimized: data.minimized === true || data.state === 'minimized',
     maximized: data.maximized === true || wasFullscreen,
+    textZoom: typeof data.textZoom === 'number' && Number.isFinite(data.textZoom) ? clamp(data.textZoom, 0.5, 3) : undefined,
   };
 }
 

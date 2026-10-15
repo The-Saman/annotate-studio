@@ -9,7 +9,8 @@ import { aiChat, errorMessage } from '@/lib/tauri-commands';
 import { trimHistory } from '@/lib/ai';
 import { useMotivationSessions, type ChatMessage } from '@/store/sessions';
 import { useSettings } from '@/store/settings';
-import { cn, isRtlText } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+import { isRtlText } from '@/lib/bidi';
 
 const QUOTES = [
   { text: 'The expert in anything was once a beginner.', author: 'Helen Hayes' },

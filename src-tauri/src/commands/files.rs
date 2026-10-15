@@ -114,17 +114,29 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+const NOTE_EXTENSIONS: [&str; 7] = ["md", "tex", "txt", "lean", "bib", "csv", "typ"];
+
+pub fn note_file_name(name: &str, extension: Option<&str>) -> String {
+    let ext = extension
+        .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+        .filter(|e| NOTE_EXTENSIONS.contains(&e.as_str()))
+        .unwrap_or_else(|| "md".into());
+    let requested = name.trim();
+    let stem = strip_extension_ignore_case(requested, &ext)
+        .or_else(|| strip_extension_ignore_case(requested, "md"))
+        .or_else(|| strip_extension_ignore_case(requested, "markdown"))
+        .unwrap_or(requested);
+    format!("{}.{ext}", sanitize_stem(stem))
+}
+
 #[tauri::command(async)]
 pub fn create_note(
     state: State<'_, AppState>,
     name: String,
     content: String,
+    extension: Option<String>,
 ) -> Result<StudyFile, String> {
-    let requested = name.trim();
-    let stem = strip_extension_ignore_case(requested, "md")
-        .or_else(|| strip_extension_ignore_case(requested, "markdown"))
-        .unwrap_or(requested);
-    let file_name = format!("{}.md", sanitize_stem(stem));
+    let file_name = note_file_name(&name, extension.as_deref());
     let dir = state.workspace.resolve(NOTES_DIR)?;
     let target = unique_in_dir(&dir, &file_name);
     write_atomic(&target, content.as_bytes())?;
@@ -166,7 +178,11 @@ pub fn rename_workspace_file(
         unique_in_dir(parent, &name)
     };
     std::fs::rename(&from, &target).map_err(|e| io_error(&path, e))?;
-    describe_or_err(&state, &target)
+    let renamed = describe_or_err(&state, &target)?;
+    if let Ok(mut index) = state.search_index.lock() {
+        let _ = index.rename(&path, &renamed.path);
+    }
+    Ok(renamed)
 }
 
 #[tauri::command(async)]
@@ -174,6 +190,9 @@ pub fn delete_workspace_file(state: State<'_, AppState>, path: String) -> Result
     let full = state.workspace.resolve_user_file(&path)?;
     if full.is_file() {
         std::fs::remove_file(&full).map_err(|e| io_error(&path, e))?;
+    }
+    if let Ok(mut index) = state.search_index.lock() {
+        index.remove(&path);
     }
     Ok(())
 }
@@ -345,6 +364,15 @@ mod tests {
         let mut body = frame(r#"{"path":"x"}"#, b"");
         body.truncate(6);
         assert!(decode_frame(&body).is_err());
+    }
+
+    #[test]
+    fn builds_note_file_names() {
+        assert_eq!(note_file_name("Physics", None), "Physics.md");
+        assert_eq!(note_file_name("Paper.tex", Some("tex")), "Paper.tex");
+        assert_eq!(note_file_name("Paper.md", Some(".TEX")), "Paper.tex");
+        assert_eq!(note_file_name("notes", Some("exe")), "notes.md");
+        assert_eq!(note_file_name("proof.lean", Some("lean")), "proof.lean");
     }
 
     #[test]

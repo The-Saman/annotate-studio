@@ -1,14 +1,19 @@
 'use client';
 
 import React, { forwardRef, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { ArrowUp, BookOpenCheck, FileText, Paperclip, Square, Wand2, X } from 'lucide-react';
+import { ArrowUp, BookOpenCheck, Bot, Brain, FileText, Paperclip, Square, Wand2, X } from 'lucide-react';
 import type { ChatEngine } from './useChatEngine';
 import PromptsDialog from './PromptsDialog';
 import { getPreset, type PromptId } from '@/lib/promptPresets';
 import { useLibrary } from '@/store/library';
 import { useChatSessions } from '@/store/sessions';
+import { useSettings } from '@/store/settings';
 import type { StudyFile } from '@/lib/tauri-commands';
-import { cn, isRtlText } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+import { isRtlText, normalizeForSearch } from '@/lib/bidi';
+import { importBrowserFiles } from '@/lib/workspace-actions';
+import { PRESETS } from '@/lib/agent/prompts';
+import FileLabel from '@/components/ui/FileLabel';
 
 export interface ChatComposerHandle {
   setDraft: (text: string) => void;
@@ -19,14 +24,30 @@ interface ChatComposerProps {
   engine: ChatEngine;
 }
 
+interface SlashCommand {
+  name: string;
+  hint: string;
+}
+
+const COMMANDS: SlashCommand[] = [
+  { name: 'booklet', hint: 'Turn the attached files into a study booklet' },
+  { name: 'ocr', hint: 'Transcribe scanned PDFs or images into notes' },
+  ...Object.entries(PRESETS).map(([name, preset]) => ({ name, hint: preset.description })),
+  { name: 'deep', hint: 'Answer with the reasoning model, thinking deeply' },
+  { name: 'flashcards', hint: 'Make flashcards from the attached material' },
+];
+
 const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer({ engine }, ref) {
   const [value, setValue] = useState('');
   const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
   const [highlight, setHighlight] = useState(0);
-  const [promptsOpen, setPromptsOpen] = useState(false);
-  const [enabledPrompt, setEnabledPrompt] = useState<PromptId | null>(null);
+  const [deep, setDeep] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const files = useLibrary((state) => state.files);
+  const agentEnabled = useSettings((state) => state.agent.enabled);
+  const updateAgent = useSettings((state) => state.updateAgent);
+  const [promptsOpen, setPromptsOpen] = useState(false);
+  const [enabledPrompt, setEnabledPrompt] = useState<PromptId | null>(null);
   const hasConversation = useChatSessions((state) => {
     const session = state.sessions.find((item) => item.id === state.activeId);
     return (session?.messages ?? []).some((message) => !message.error);
@@ -36,7 +57,7 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
     const element = textareaRef.current;
     if (!element) return;
     element.style.height = 'auto';
-    element.style.height = `${Math.min(element.scrollHeight, 160)}px`;
+    element.style.height = `${Math.min(element.scrollHeight, 180)}px`;
   };
 
   useImperativeHandle(ref, () => ({
@@ -56,9 +77,13 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
 
   const suggestions = useMemo(() => {
     if (!mention) return [] as StudyFile[];
-    const query = mention.query.toLowerCase();
-    return files.filter((file) => file.file_type !== 'Image' && file.name.toLowerCase().includes(query)).slice(0, 8);
+    const query = normalizeForSearch(mention.query);
+    return files.filter((file) => normalizeForSearch(file.name).includes(query)).slice(0, 8);
   }, [mention, files]);
+
+  const trimmed = value.trim();
+  const slash = /^\/\w*$/.test(trimmed) ? trimmed.slice(1).toLowerCase() : null;
+  const commands = slash !== null ? COMMANDS.filter((command) => command.name.startsWith(slash)) : [];
 
   const updateMention = (text: string, caret: number) => {
     const before = text.slice(0, caret);
@@ -86,6 +111,17 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
     });
   };
 
+  const pickCommand = (command: SlashCommand) => {
+    const next = `/${command.name} `;
+    setValue(next);
+    setHighlight(0);
+    requestAnimationFrame(() => {
+      const element = textareaRef.current;
+      element?.focus();
+      element?.setSelectionRange(next.length, next.length);
+    });
+  };
+
   const submit = () => {
     const text = value.trim();
     if (!text || engine.busy) return;
@@ -95,7 +131,7 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
     setEnabledPrompt(null);
     requestAnimationFrame(resize);
     if (prompt) void engine.runPrompt(prompt, { text });
-    else void engine.send(text);
+    else void engine.send(text, { deep });
   };
 
   const draft = value.trim();
@@ -106,6 +142,20 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
     requestAnimationFrame(resize);
     void engine.explain(draft);
   };
+
+  const onPaste = async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const images = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith('image/'));
+    if (images.length === 0) return;
+    event.preventDefault();
+    const stamp = new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '-');
+    const named = images.map(
+      (file, index) => new File([file], `Chat image ${stamp}${index ? ` ${index + 1}` : ''}.${file.type.split('/')[1] || 'png'}`, { type: file.type }),
+    );
+    const saved = await importBrowserFiles(named);
+    engine.addAttachments(saved);
+  };
+
+  const menuOpen = (mention !== null && suggestions.length > 0) || commands.length > 0;
 
   const pickPrompt = (preset: PromptId) => {
     setPromptsOpen(false);
@@ -161,7 +211,7 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
             <span key={attachment.path} className={cn('attachment-chip', !attachment.enabled && 'attachment-chip-off')}>
               <button type="button" onClick={() => engine.toggleAttachment(attachment.path)} title={attachment.enabled ? 'Included in the next message' : 'Not included'}>
                 <FileText size={12} />
-                <span>{attachment.name}</span>
+                <FileLabel path={attachment.name} />
               </button>
               <button type="button" onClick={() => engine.removeAttachment(attachment.path)} aria-label="Remove attachment">
                 <X size={11} />
@@ -171,24 +221,46 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
         </div>
       )}
       <div className="chat-input-row">
-        {mention && suggestions.length > 0 && (
+        {menuOpen && (
           <div className="mention-menu menu">
-            {suggestions.map((file, index) => (
-              <button
-                key={file.path}
-                type="button"
-                className={cn('menu-item', index === highlight && 'menu-item-active')}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  pickMention(file);
-                }}
-              >
-                <span className="menu-item-icon">
-                  <FileText size={13} />
-                </span>
-                <span className="menu-item-label">{file.name}</span>
-              </button>
-            ))}
+            {commands.length > 0
+              ? commands.map((command, index) => (
+                  <button
+                    key={command.name}
+                    type="button"
+                    className={cn('menu-item', index === highlight && 'menu-item-active')}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      pickCommand(command);
+                    }}
+                  >
+                    <span className="menu-item-icon">
+                      <Wand2 size={13} />
+                    </span>
+                    <span className="menu-item-label">
+                      /{command.name}
+                      <small>{command.hint}</small>
+                    </span>
+                  </button>
+                ))
+              : suggestions.map((file, index) => (
+                  <button
+                    key={file.path}
+                    type="button"
+                    className={cn('menu-item', index === highlight && 'menu-item-active')}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      pickMention(file);
+                    }}
+                  >
+                    <span className="menu-item-icon">
+                      <FileText size={13} />
+                    </span>
+                    <span className="menu-item-label" dir="auto">
+                      {file.name}
+                    </span>
+                  </button>
+                ))}
           </div>
         )}
         <textarea
@@ -196,33 +268,37 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
           value={value}
           rows={1}
           dir={isRtlText(value) ? 'rtl' : 'auto'}
-          placeholder="Ask anything… type @ to attach a document"
+          placeholder={agentEnabled ? 'Ask or give a task… @ attaches a file, / shows commands' : 'Ask anything… type @ to attach a document'}
+          onPaste={(event) => void onPaste(event)}
           onChange={(event) => {
             setValue(event.target.value);
             updateMention(event.target.value, event.target.selectionStart ?? event.target.value.length);
             resize();
           }}
           onKeyDown={(event) => {
-            if (mention && suggestions.length > 0) {
+            const count = commands.length > 0 ? commands.length : mention ? suggestions.length : 0;
+            if (count > 0) {
               if (event.key === 'ArrowDown') {
                 event.preventDefault();
-                setHighlight((i) => (i + 1) % suggestions.length);
+                setHighlight((i) => (i + 1) % count);
                 return;
               }
               if (event.key === 'ArrowUp') {
                 event.preventDefault();
-                setHighlight((i) => (i - 1 + suggestions.length) % suggestions.length);
+                setHighlight((i) => (i - 1 + count) % count);
                 return;
               }
-              if (event.key === 'Enter' || event.key === 'Tab') {
+              if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
                 event.preventDefault();
-                pickMention(suggestions[highlight]);
+                if (commands.length > 0) pickCommand(commands[Math.min(highlight, commands.length - 1)]);
+                else pickMention(suggestions[Math.min(highlight, suggestions.length - 1)]);
                 return;
               }
               if (event.key === 'Escape') {
                 event.preventDefault();
                 event.stopPropagation();
                 setMention(null);
+                if (commands.length > 0) setValue('');
                 return;
               }
             }
@@ -269,6 +345,24 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
             </button>
           )}
         </div>
+      </div>
+      <div className="chat-modes">
+        <button
+          type="button"
+          className={cn('chat-mode', agentEnabled && 'chat-mode-on')}
+          onClick={() => updateAgent({ enabled: !agentEnabled })}
+          title={agentEnabled ? 'Agent: the assistant searches, reads and writes your files itself' : 'Chat only: the assistant sees only attached files'}
+        >
+          <Bot size={12} /> Agent
+        </button>
+        <button
+          type="button"
+          className={cn('chat-mode', deep && 'chat-mode-on')}
+          onClick={() => setDeep((current) => !current)}
+          title="Think deeper: use the reasoning model with extended thinking"
+        >
+          <Brain size={12} /> Think deeper
+        </button>
       </div>
       <PromptsDialog open={promptsOpen} onClose={() => setPromptsOpen(false)} onPick={pickPrompt} hint={promptHint} />
     </div>

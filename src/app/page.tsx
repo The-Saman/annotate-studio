@@ -19,6 +19,7 @@ const ExamsTab = dynamic(() => import('@/components/study/exams/ExamsTab'), { ss
 const PomodoroTab = dynamic(() => import('@/components/study/PomodoroTab'), { ssr: false });
 const MotivationTab = dynamic(() => import('@/components/study/MotivationTab'), { ssr: false });
 const SettingsTab = dynamic(() => import('@/components/study/SettingsTab'), { ssr: false });
+const FormulaViewer = dynamic(() => import('@/components/markdown/FormulaViewer'), { ssr: false });
 
 export default function Home() {
   useAppEngines();
@@ -52,6 +53,7 @@ export default function Home() {
       <Toaster />
       <DialogHost />
       <ContextMenuHost />
+      <FormulaViewer />
     </div>
   );
 }

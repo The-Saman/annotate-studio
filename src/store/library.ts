@@ -6,6 +6,8 @@ interface LibraryStore {
   loading: boolean;
   loaded: boolean;
   error: string | null;
+  revisions: Record<string, number>;
+  bumpRevision: (path: string) => void;
   refresh: () => Promise<StudyFile[]>;
   upsert: (file: StudyFile) => void;
   remove: (path: string) => void;
@@ -23,6 +25,8 @@ export const useLibrary = create<LibraryStore>((set) => ({
   loading: false,
   loaded: false,
   error: null,
+  revisions: {},
+  bumpRevision: (path) => set((state) => ({ revisions: { ...state.revisions, [path]: (state.revisions[path] ?? 0) + 1 } })),
   refresh: () => {
     if (inflight) return inflight;
     set({ loading: true });

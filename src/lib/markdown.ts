@@ -3,11 +3,15 @@ export type Inline =
   | { type: 'strong'; children: Inline[] }
   | { type: 'em'; children: Inline[] }
   | { type: 'del'; children: Inline[] }
+  | { type: 'mark'; children: Inline[] }
   | { type: 'code'; value: string }
   | { type: 'math'; value: string; display: boolean }
   | { type: 'link'; href: string; children: Inline[] }
   | { type: 'image'; src: string; alt: string }
   | { type: 'wikilink'; target: string; label: string }
+  | { type: 'footnoteRef'; id: string }
+  | { type: 'ref'; key: string; style: 'ref' | 'eqref' | 'auto' }
+  | { type: 'cite'; keys: string[] }
   | { type: 'break' };
 
 export type Align = 'left' | 'center' | 'right' | null;
@@ -21,13 +25,50 @@ export type Block =
   | { type: 'heading'; level: 1 | 2 | 3 | 4 | 5 | 6; children: Inline[] }
   | { type: 'paragraph'; children: Inline[] }
   | { type: 'code'; lang: string; value: string }
-  | { type: 'math'; value: string }
+  | { type: 'math'; value: string; env: string | null }
   | { type: 'quote'; children: Block[] }
+  | { type: 'callout'; kind: string; title: Inline[]; fold: 'open' | 'closed' | null; children: Block[] }
+  | { type: 'env'; name: string; title: Inline[] | null; label: string | null; children: Block[] }
   | { type: 'list'; ordered: boolean; start: number; tight: boolean; items: ListItem[] }
   | { type: 'table'; align: Align[]; header: Inline[][]; rows: Inline[][][] }
+  | { type: 'footnoteDef'; id: string; children: Block[] }
+  | { type: 'defs'; value: string }
   | { type: 'hr' };
 
-const ESCAPABLE = '\\`*_{}[]()#+-.!|~$<>"\'';
+export const MATH_ENVIRONMENTS = [
+  'equation',
+  'align',
+  'gather',
+  'multline',
+  'flalign',
+  'alignat',
+  'eqnarray',
+  'displaymath',
+  'CD',
+];
+
+export const THEOREM_ENVIRONMENTS = [
+  'theorem',
+  'lemma',
+  'proposition',
+  'corollary',
+  'definition',
+  'example',
+  'remark',
+  'note',
+  'proof',
+  'exercise',
+  'solution',
+  'problem',
+  'claim',
+  'conjecture',
+  'axiom',
+  'hint',
+  'question',
+  'answer',
+];
+
+const ESCAPABLE = '\\`*_{}[]()#+-.!|~$<>"\'=';
 const FENCE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 const HR = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
@@ -35,6 +76,19 @@ const QUOTE = /^ {0,3}>[ ]?(.*)$/;
 const LIST_ITEM = /^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+|$)(.*)$/;
 const TABLE_SEPARATOR = /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
 const MATH_OPEN = /^ {0,3}\$\$(.*)$/;
+const BRACKET_MATH_OPEN = /^ {0,3}\\\[(.*)$/;
+const ENV_OPEN = /^ {0,3}\\begin\{([A-Za-z]+)(\*?)\}(.*)$/;
+const CALLOUT = /^\[!([A-Za-z][\w-]*)\]([+-]?)[ \t]*(.*)$/;
+const FOOTNOTE_DEF = /^ {0,3}\[\^([^\]\s]+)\]:[ \t]?(.*)$/;
+const DEFS = /^ {0,3}\\(newcommand|renewcommand|providecommand|DeclareMathOperator|def|gdef|let|newenvironment)\b/;
+
+function isMathEnvironment(name: string): boolean {
+  return MATH_ENVIRONMENTS.includes(name);
+}
+
+function isTheoremEnvironment(name: string): boolean {
+  return THEOREM_ENVIRONMENTS.includes(name.toLowerCase());
+}
 
 function indentWidth(text: string): number {
   let width = 0;
@@ -70,15 +124,17 @@ function splitRow(line: string): string[] {
   const cells: string[] = [];
   let current = '';
   let inCode = false;
+  let inMath = false;
   for (let i = 0; i < trimmed.length; i += 1) {
     const char = trimmed[i];
     if (char === '\\' && trimmed[i + 1] === '|') {
-      current += '|';
+      current += inMath ? '\\vert ' : '|';
       i += 1;
       continue;
     }
-    if (char === '`') inCode = !inCode;
-    if (char === '|' && !inCode) {
+    if (char === '`' && !inMath) inCode = !inCode;
+    if (char === '$' && !inCode && trimmed[i - 1] !== '\\') inMath = !inMath;
+    if (char === '|' && !inCode && !inMath) {
       cells.push(current.trim());
       current = '';
       continue;
@@ -89,13 +145,23 @@ function splitRow(line: string): string[] {
   return cells;
 }
 
+function envOpening(line: string): { name: string; star: string; rest: string } | null {
+  const match = ENV_OPEN.exec(line);
+  if (!match) return null;
+  return { name: match[1], star: match[2], rest: match[3] };
+}
+
 function startsBlock(line: string): boolean {
+  const env = envOpening(line);
   return (
     FENCE.test(line) ||
     HEADING.test(line) ||
     HR.test(line) ||
     QUOTE.test(line) ||
     MATH_OPEN.test(line) ||
+    BRACKET_MATH_OPEN.test(line) ||
+    (env !== null && (isMathEnvironment(env.name) || isTheoremEnvironment(env.name))) ||
+    FOOTNOTE_DEF.test(line) ||
     (LIST_ITEM.test(line) && !/^\s*\d{1,9}[.)]\s*$/.test(line) && LIST_ITEM.exec(line)![4].trim() !== '')
   );
 }
@@ -169,6 +235,43 @@ function parseList(lines: string[], start: number): { block: Block; next: number
   return { block: { type: 'list', ordered, start: startNumber, tight, items }, next: i };
 }
 
+function collectEnvironment(lines: string[], start: number, name: string, firstRest: string): { body: string[]; next: number; after: string } {
+  const token = new RegExp(`\\\\(begin|end)\\{${name}\\*?\\}`, 'g');
+  const body: string[] = [];
+  let depth = 1;
+  let index = start;
+  let text = firstRest;
+  while (true) {
+    token.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = token.exec(text)) !== null) {
+      depth += match[1] === 'begin' ? 1 : -1;
+      if (depth === 0) {
+        body.push(text.slice(0, match.index));
+        return { body, next: index + 1, after: text.slice(match.index + match[0].length) };
+      }
+    }
+    body.push(text);
+    index += 1;
+    if (index >= lines.length) return { body, next: index, after: '' };
+    text = lines[index];
+  }
+}
+
+function extractLabel(text: string): { text: string; label: string | null } {
+  let label: string | null = null;
+  const cleaned = text.replace(/\\label\{([^}]*)\}/, (_match, key: string) => {
+    label = key.trim();
+    return '';
+  });
+  return { text: cleaned, label };
+}
+
+function defaultCalloutTitle(kind: string): string {
+  const normalized = kind.toLowerCase();
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
 export function parseBlocks(input: string[]): Block[] {
   const lines = input.slice();
   const blocks: Block[] = [];
@@ -199,13 +302,14 @@ export function parseBlocks(input: string[]): Block[] {
       continue;
     }
 
-    const math = MATH_OPEN.exec(line);
+    const math = MATH_OPEN.exec(line) ?? BRACKET_MATH_OPEN.exec(line);
     if (math) {
+      const closer = line.trimStart().startsWith('$$') ? '$$' : '\\]';
       const rest = math[1];
-      const inlineClose = rest.indexOf('$$');
+      const inlineClose = rest.indexOf(closer);
       if (inlineClose >= 0) {
-        blocks.push({ type: 'math', value: rest.slice(0, inlineClose).trim() });
-        const after = rest.slice(inlineClose + 2);
+        blocks.push({ type: 'math', value: rest.slice(0, inlineClose).trim(), env: null });
+        const after = rest.slice(inlineClose + closer.length);
         if (after.trim()) lines[i] = after.trim();
         else i += 1;
         continue;
@@ -213,10 +317,10 @@ export function parseBlocks(input: string[]): Block[] {
       const body: string[] = rest.trim() ? [rest] : [];
       i += 1;
       while (i < lines.length) {
-        const closeAt = lines[i].indexOf('$$');
+        const closeAt = lines[i].indexOf(closer);
         if (closeAt >= 0) {
           const before = lines[i].slice(0, closeAt);
-          const after = lines[i].slice(closeAt + 2);
+          const after = lines[i].slice(closeAt + closer.length);
           if (before.trim()) body.push(before);
           if (after.trim()) lines[i] = after.trim();
           else i += 1;
@@ -225,7 +329,84 @@ export function parseBlocks(input: string[]): Block[] {
         body.push(lines[i]);
         i += 1;
       }
-      blocks.push({ type: 'math', value: body.join('\n').trim() });
+      blocks.push({ type: 'math', value: body.join('\n').trim(), env: null });
+      continue;
+    }
+
+    const env = envOpening(line);
+    if (env && isMathEnvironment(env.name)) {
+      const { body, next, after } = collectEnvironment(lines, i, env.name, env.rest);
+      const inner = body.join('\n');
+      blocks.push({
+        type: 'math',
+        value: `\\begin{${env.name}${env.star}}${inner}\\end{${env.name}${env.star}}`,
+        env: `${env.name}${env.star}`,
+      });
+      i = next;
+      if (after.trim()) {
+        i -= 1;
+        lines[i] = after.trim();
+      }
+      continue;
+    }
+
+    if (env && isTheoremEnvironment(env.name)) {
+      const titleMatch = /^\[([^\]]*)\](.*)$/.exec(env.rest.trim());
+      const firstRest = titleMatch ? titleMatch[2] : env.rest;
+      const { body, next, after } = collectEnvironment(lines, i, env.name, firstRest);
+      const { text, label } = extractLabel(body.join('\n'));
+      blocks.push({
+        type: 'env',
+        name: env.name.toLowerCase(),
+        title: titleMatch && titleMatch[1].trim() ? parseInline(titleMatch[1].trim()) : null,
+        label,
+        children: parseBlocks(text.split('\n')),
+      });
+      i = next;
+      if (after.trim()) {
+        i -= 1;
+        lines[i] = after.trim();
+      }
+      continue;
+    }
+
+    const footnote = FOOTNOTE_DEF.exec(line);
+    if (footnote) {
+      const content: string[] = [footnote[2]];
+      i += 1;
+      while (i < lines.length) {
+        const next = lines[i];
+        if (isBlank(next)) {
+          if (i + 1 < lines.length && indentWidth(lines[i + 1]) >= 2 && !isBlank(lines[i + 1])) {
+            content.push('');
+            i += 1;
+            continue;
+          }
+          break;
+        }
+        if (indentWidth(next) >= 2) {
+          content.push(stripIndent(next, 4));
+          i += 1;
+          continue;
+        }
+        if (startsBlock(next)) break;
+        content.push(next.trim());
+        i += 1;
+      }
+      blocks.push({ type: 'footnoteDef', id: footnote[1], children: parseBlocks(content) });
+      continue;
+    }
+
+    if (DEFS.test(line)) {
+      const body: string[] = [line];
+      let depth = braceDepth(line);
+      i += 1;
+      while (i < lines.length && (depth > 0 || DEFS.test(lines[i]))) {
+        body.push(lines[i]);
+        depth += braceDepth(lines[i]);
+        i += 1;
+      }
+      blocks.push({ type: 'defs', value: body.join('\n') });
       continue;
     }
 
@@ -254,6 +435,19 @@ export function parseBlocks(input: string[]): Block[] {
         else if (!startsBlock(lines[i])) inner.push(lines[i]);
         else break;
         i += 1;
+      }
+      const callout = inner.length > 0 ? CALLOUT.exec(inner[0].trim()) : null;
+      if (callout) {
+        const kind = callout[1].toLowerCase();
+        const titleText = callout[3].trim();
+        blocks.push({
+          type: 'callout',
+          kind,
+          title: titleText ? parseInline(titleText) : [],
+          fold: callout[2] === '-' ? 'closed' : callout[2] === '+' ? 'open' : null,
+          children: parseBlocks(inner.slice(1)),
+        });
+        continue;
       }
       blocks.push({ type: 'quote', children: parseBlocks(inner) });
       continue;
@@ -295,6 +489,20 @@ export function parseBlocks(input: string[]): Block[] {
     blocks.push({ type: 'paragraph', children: parseInline(paragraph.map((l) => l.replace(/^[ \t]+/, '')).join('\n')) });
   }
   return blocks;
+}
+
+function braceDepth(line: string): number {
+  let depth = 0;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (char === '\\') {
+      i += 1;
+      continue;
+    }
+    if (char === '{') depth += 1;
+    else if (char === '}') depth -= 1;
+  }
+  return depth;
 }
 
 function isWhitespace(char: string | undefined): boolean {
@@ -368,6 +576,8 @@ function parseDestination(src: string, open: number): { href: string; end: numbe
 }
 
 const URL_PATTERN = /^(https?:\/\/[^\s<>]+)/i;
+const REF_PATTERN = /^\\(eqref|ref|autoref|cref|Cref)\{([^}\n]+)\}/;
+const CITE_PATTERN = /^\\(cite|citep|citet|parencite|textcite)(?:\[[^\]]*\])?\{([^}\n]+)\}/;
 
 export function parseInline(src: string): Inline[] {
   const out: Inline[] = [];
@@ -383,6 +593,34 @@ export function parseInline(src: string): Inline[] {
   while (i < src.length) {
     const char = src[i];
     const next = src[i + 1];
+
+    if (char === '\\' && (next === '(' || next === '[')) {
+      const closer = next === '(' ? '\\)' : '\\]';
+      const close = src.indexOf(closer, i + 2);
+      if (close > i + 2) {
+        flush();
+        out.push({ type: 'math', value: src.slice(i + 2, close).trim(), display: next === '[' });
+        i = close + 2;
+        continue;
+      }
+    }
+
+    if (char === '\\' && next !== undefined && /[A-Za-z]/.test(next)) {
+      const ref = REF_PATTERN.exec(src.slice(i));
+      if (ref) {
+        flush();
+        out.push({ type: 'ref', key: ref[2].trim(), style: ref[1] === 'eqref' ? 'eqref' : ref[1] === 'ref' ? 'ref' : 'auto' });
+        i += ref[0].length;
+        continue;
+      }
+      const cite = CITE_PATTERN.exec(src.slice(i));
+      if (cite) {
+        flush();
+        out.push({ type: 'cite', keys: cite[2].split(',').map((key) => key.trim()).filter(Boolean) });
+        i += cite[0].length;
+        continue;
+      }
+    }
 
     if (char === '\\' && next !== undefined) {
       if (next === '\n') {
@@ -474,6 +712,16 @@ export function parseInline(src: string): Inline[] {
     }
 
     if (char === '[') {
+      if (next === '^') {
+        const close = src.indexOf(']', i + 2);
+        const id = close > 0 ? src.slice(i + 2, close) : '';
+        if (id && !/\s/.test(id) && src[close + 1] !== '(') {
+          flush();
+          out.push({ type: 'footnoteRef', id });
+          i = close + 1;
+          continue;
+        }
+      }
       if (next === '[') {
         const close = src.indexOf(']]', i + 2);
         const inner = close > 0 ? src.slice(i + 2, close) : '';
@@ -526,6 +774,16 @@ export function parseInline(src: string): Inline[] {
       if (close > 0 && !isWhitespace(src[i + 2])) {
         flush();
         out.push({ type: 'del', children: parseInline(src.slice(i + 2, close)) });
+        i = close + 2;
+        continue;
+      }
+    }
+
+    if (char === '=' && next === '=' && src[i + 2] !== '=') {
+      const close = findClosing(src, i + 2, '==');
+      if (close > 0 && !isWhitespace(src[i + 2])) {
+        flush();
+        out.push({ type: 'mark', children: parseInline(src.slice(i + 2, close)) });
         i = close + 2;
         continue;
       }
@@ -592,8 +850,39 @@ export function inlineText(nodes: Inline[]): string {
           return node.alt;
         case 'wikilink':
           return node.label;
+        case 'footnoteRef':
+          return '';
+        case 'ref':
+          return node.key;
+        case 'cite':
+          return node.keys.join(', ');
         default:
           return inlineText(node.children);
+      }
+    })
+    .join('');
+}
+
+export function inlineProse(nodes: Inline[]): string {
+  return nodes
+    .map((node) => {
+      switch (node.type) {
+        case 'text':
+          return node.value;
+        case 'break':
+          return ' ';
+        case 'image':
+          return node.alt;
+        case 'wikilink':
+          return node.label;
+        case 'strong':
+        case 'em':
+        case 'del':
+        case 'mark':
+        case 'link':
+          return inlineProse(node.children);
+        default:
+          return ' ';
       }
     })
     .join('');

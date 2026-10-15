@@ -18,7 +18,10 @@ impl FileType {
         match ext.to_lowercase().as_str() {
             "pdf" => FileType::Pdf,
             "md" | "markdown" | "mdx" => FileType::Markdown,
-            "txt" | "text" => FileType::Text,
+            "txt" | "text" | "tex" | "latex" | "bib" | "lean" | "typ" | "csv" | "json" | "yaml"
+            | "yml" | "py" | "rs" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "zig"
+            | "hs" | "ml" | "jl" | "r" | "m" | "sql" | "sh" | "toml" | "xml" | "html" | "css"
+            | "srt" | "log" => FileType::Text,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "avif" => FileType::Image,
             "docx" | "odt" => FileType::Document,
             _ => FileType::Unknown,
