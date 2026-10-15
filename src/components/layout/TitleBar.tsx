@@ -64,9 +64,7 @@ export default function TitleBar() {
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-brand" data-tauri-drag-region>
-        <span className="titlebar-logo" data-tauri-drag-region>
-          A
-        </span>
+        <img className="titlebar-logo" src="/logo.svg" alt="" draggable={false} data-tauri-drag-region />
         <span data-tauri-drag-region>Annotate Studio</span>
         {view === 'canvas' && (
           <span className="titlebar-context" data-tauri-drag-region>
