@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Send, X } from 'lucide-react';
 import MarkdownRenderer from '@/components/markdown/MarkdownRenderer';
 import type { LessonState } from './useChatEngine';
-import { isRtlText } from '@/lib/utils';
+import { isRtlText } from '@/lib/bidi';
 
 interface LessonViewProps {
   lesson: LessonState;
@@ -28,6 +28,23 @@ export default function LessonView({ lesson, onChange, onAsk }: LessonViewProps)
   }, [lesson.thread.length]);
 
   const go = (index: number) => onChange({ ...lesson, index: Math.max(0, Math.min(total - 1, index)), thread: [] });
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLElement && event.target.closest('input, textarea, .cm-editor')) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      const rtl = document.querySelector('.lesson-step [dir="rtl"]') !== null;
+      if (event.key === 'PageDown' || event.key === (rtl ? 'ArrowLeft' : 'ArrowRight')) {
+        event.preventDefault();
+        onChange({ ...lesson, index: Math.min(total - 1, lesson.index + 1), thread: [] });
+      } else if (event.key === 'PageUp' || event.key === (rtl ? 'ArrowRight' : 'ArrowLeft')) {
+        event.preventDefault();
+        onChange({ ...lesson, index: Math.max(0, lesson.index - 1), thread: [] });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lesson, onChange, total]);
 
   const ask = () => {
     const text = question.trim();
@@ -53,7 +70,9 @@ export default function LessonView({ lesson, onChange, onAsk }: LessonViewProps)
         <div style={{ width: `${((lesson.index + 1) / total) * 100}%` }} />
       </div>
       <div ref={bodyRef} className="lesson-body content-selectable">
-        <MarkdownRenderer content={lesson.steps[lesson.index]} />
+        <div key={lesson.index} className="lesson-step">
+          <MarkdownRenderer content={lesson.steps[lesson.index]} />
+        </div>
         {lesson.thread.length > 0 && (
           <div className="lesson-thread">
             {lesson.thread.map((entry, index) => (

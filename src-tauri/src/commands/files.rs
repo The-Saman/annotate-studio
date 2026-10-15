@@ -178,7 +178,11 @@ pub fn rename_workspace_file(
         unique_in_dir(parent, &name)
     };
     std::fs::rename(&from, &target).map_err(|e| io_error(&path, e))?;
-    describe_or_err(&state, &target)
+    let renamed = describe_or_err(&state, &target)?;
+    if let Ok(mut index) = state.search_index.lock() {
+        let _ = index.rename(&path, &renamed.path);
+    }
+    Ok(renamed)
 }
 
 #[tauri::command(async)]
@@ -186,6 +190,9 @@ pub fn delete_workspace_file(state: State<'_, AppState>, path: String) -> Result
     let full = state.workspace.resolve_user_file(&path)?;
     if full.is_file() {
         std::fs::remove_file(&full).map_err(|e| io_error(&path, e))?;
+    }
+    if let Ok(mut index) = state.search_index.lock() {
+        index.remove(&path);
     }
     Ok(())
 }

@@ -1,4 +1,4 @@
-import { invoke, type InvokeArgs } from '@tauri-apps/api/core';
+import { Channel, invoke, type InvokeArgs } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export type FileType = 'Pdf' | 'Markdown' | 'Text' | 'Image' | 'Document' | 'Unknown';
@@ -27,13 +27,76 @@ export interface AIResponse {
   tokens_used?: number | null;
 }
 
+export interface ModelCapabilities {
+  vision?: boolean;
+  tools?: boolean;
+  reasoning?: boolean;
+  contextWindow?: number;
+}
+
 export interface ProviderInfo {
   id: string;
   type: string;
   model: string;
   endpoint?: string | null;
   active: boolean;
+  capabilities: ModelCapabilities;
 }
+
+export interface ModelInfo {
+  id: string;
+  name?: string | null;
+  capabilities: ModelCapabilities;
+}
+
+export type ContentPart = { type: 'text'; text: string } | { type: 'image'; mediaType: string; data: string };
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: unknown;
+}
+
+export interface TurnMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: ContentPart[];
+  toolCalls?: ToolCall[];
+  toolCallId?: string;
+  toolName?: string;
+  raw?: unknown;
+  rawProvider?: string;
+}
+
+export interface ToolSpec {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface TurnRequest {
+  messages: TurnMessage[];
+  tools?: ToolSpec[];
+  model?: string;
+  temperature?: number;
+  maxTokens?: number;
+  reasoning?: 'low' | 'medium' | 'high';
+  contextWindow?: number;
+  requestId?: string;
+}
+
+export interface TurnResponse {
+  content: string;
+  reasoning: string;
+  toolCalls: ToolCall[];
+  stopReason: string;
+  usage: { inputTokens?: number | null; outputTokens?: number | null };
+  provider: string;
+  model: string;
+  raw?: unknown;
+  rawProvider: string;
+}
+
+export type TurnEvent = { type: 'text'; delta: string } | { type: 'reasoning'; delta: string } | { type: 'toolCall'; name: string };
 
 export type ReviewQuality = 'Again' | 'Hard' | 'Good' | 'Easy';
 
@@ -242,14 +305,81 @@ export function onGenerationProgress(handler: (progress: GenerationProgress) => 
   return listen<GenerationProgress>('flashcard-generation-progress', (event) => handler(event.payload));
 }
 
+export function aiTurn(request: TurnRequest, onEvent?: (event: TurnEvent) => void): Promise<TurnResponse> {
+  const channel = new Channel<TurnEvent>();
+  if (onEvent) channel.onmessage = onEvent;
+  return call<TurnResponse>('ai_turn', {
+    request: { ...request, model: request.model || null, tools: request.tools ?? [] },
+    onEvent: channel,
+  });
+}
+
+export const listProviderModels = (providerType: string, apiKey?: string, endpoint?: string, providerId?: string) =>
+  call<ModelInfo[]>('list_provider_models', {
+    providerType,
+    apiKey: apiKey || null,
+    endpoint: endpoint || null,
+    providerId: providerId || null,
+  });
+export const setModelCapabilities = (id: string, capabilities: ModelCapabilities) =>
+  call<ProviderInfo[]>('set_model_capabilities', { id, capabilities });
+
+export interface IndexEntry {
+  path: string;
+  modified: string;
+  pages: number | null;
+  emptyPages: number[];
+  segments: number;
+  chars: number;
+}
+
+export interface IndexedDocument {
+  path: string;
+  modified: string;
+  pages: number | null;
+  emptyPages: number[];
+  segments: { page: number | null; line: number | null; text: string }[];
+}
+
+export interface SearchHit {
+  path: string;
+  page: number | null;
+  line: number | null;
+  snippet: string;
+  score: number;
+}
+
+export const indexStatus = () => call<IndexEntry[]>('index_status');
+export const indexRefresh = () => call<{ indexed: number; removed: number; pendingPdfs: StudyFile[] }>('index_refresh');
+export const indexDocument = (
+  path: string,
+  modified: string,
+  segments: { page?: number | null; line?: number | null; text: string }[],
+  pages?: number,
+  emptyPages?: number[],
+) => call<number>('index_document', { path, modified, segments, pages: pages ?? null, emptyPages: emptyPages ?? null });
+export const indexGetDocument = (path: string) => call<IndexedDocument | null>('index_get_document', { path });
+export const searchWorkspace = (query: string, limit?: number, paths?: string[]) =>
+  call<SearchHit[]>('search_workspace', { query, limit: limit ?? null, paths: paths && paths.length ? paths : null });
+export const ocrCacheGet = (path: string, modified: string) => call<Record<string, string>>('ocr_cache_get', { path, modified });
+export const ocrCachePut = (path: string, modified: string, page: number, text: string) => call<void>('ocr_cache_put', { path, modified, page, text });
+
 export const getAIProviders = () => call<ProviderInfo[]>('get_ai_providers');
-export const addAIProvider = (providerType: string, apiKey?: string, endpoint?: string, model?: string, makeDefault?: boolean) =>
+export const addAIProvider = (
+  providerType: string,
+  apiKey?: string,
+  endpoint?: string,
+  model?: string,
+  makeDefault?: boolean,
+  capabilities?: ModelCapabilities,
+) =>
   call<ProviderInfo[]>('add_ai_provider', {
     providerType,
     apiKey: apiKey || null,
     endpoint: endpoint || null,
     model: model || null,
     makeDefault: makeDefault ?? false,
+    capabilities: capabilities ?? null,
   });
 export const removeAIProvider = (providerType: string, model?: string) =>
   call<ProviderInfo[]>('remove_ai_provider', { providerType, model: model ?? null });

@@ -3,7 +3,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   BookOpenCheck,
+  Bot,
+  CheckSquare,
   ExternalLink,
+  NotebookText,
+  ScanText,
+  Square,
+  X,
   FileImage,
   FileText,
   FileType2,
@@ -69,6 +75,7 @@ export default function LibraryTab() {
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
   const [sort, setSort] = useState<Sort>('recent');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     void refresh();
@@ -119,9 +126,33 @@ export default function LibraryTab() {
     if (ok) await deleteFile(file.path);
   };
 
+  const toggleSelected = (path: string) =>
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+  const askAgent = (paths: string[], text: string, send: boolean) => {
+    requestChat({ kind: 'agent', text, paths, send });
+    setSelected(new Set());
+  };
+
+  const makeBooklet = async (paths: string[]) => {
+    const title = await promptDialog({ title: 'Make a study booklet', message: `From ${paths.length} file${paths.length === 1 ? '' : 's'}. The agent reads them (with OCR for scanned pages) and writes one structured note.`, initialValue: 'Study booklet', confirmLabel: 'Make booklet' });
+    if (!title) return;
+    askAgent(paths, `/booklet ${title}`, true);
+  };
+
   const menuFor = (file: StudyFile): MenuEntry[] => {
     const items: MenuEntry[] = [];
     if (resourceTypeFor(file)) items.push({ label: 'Open on canvas', icon: <ExternalLink size={13} />, onSelect: () => open(file) });
+    items.push({ label: 'Ask the agent…', icon: <Bot size={13} />, onSelect: () => askAgent([file.path], '', false) });
+    if (file.file_type === 'Pdf' || file.file_type === 'Image') {
+      items.push({ label: 'Transcribe with OCR', icon: <ScanText size={13} />, onSelect: () => askAgent([file.path], '/ocr', true) });
+    }
+    items.push({ label: 'Make a study booklet…', icon: <NotebookText size={13} />, onSelect: () => void makeBooklet([file.path]) });
     if (file.file_type !== 'Image') {
       items.push(
         { label: 'Summarize with AI', icon: <ScrollText size={13} />, onSelect: () => requestChat({ kind: 'summarize', title: file.name, path: file.path }) },
@@ -163,6 +194,29 @@ export default function LibraryTab() {
         </div>
       </header>
 
+      {selected.size > 0 && (
+        <div className="selection-bar">
+          <span>
+            {selected.size} selected
+          </span>
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => void makeBooklet(Array.from(selected))}>
+            <NotebookText size={14} /> Make booklet
+          </button>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => askAgent(Array.from(selected), '', false)}>
+            <Bot size={14} /> Ask the agent
+          </button>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => askAgent(Array.from(selected).filter((path) => /\.(pdf|png|jpe?g|webp|gif|bmp|avif)$/i.test(path)), '/ocr', true)}>
+            <ScanText size={14} /> OCR
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setSelected(new Set(visible.map((file) => file.path)))}>
+            <CheckSquare size={14} /> All
+          </button>
+          <button type="button" className="icon-btn" onClick={() => setSelected(new Set())} title="Clear selection">
+            <X size={15} />
+          </button>
+        </div>
+      )}
+
       <div className="library-controls">
         <div className="search-field">
           <Search size={15} />
@@ -196,10 +250,13 @@ export default function LibraryTab() {
             return (
               <div
                 key={file.path}
-                className="file-card"
+                className={cn('file-card', selected.has(file.path) && 'file-card-selected')}
                 role="button"
                 tabIndex={0}
-                onClick={() => open(file)}
+                onClick={(event) => {
+                  if (event.ctrlKey || event.metaKey || selected.size > 0) toggleSelected(file.path);
+                  else open(file);
+                }}
                 onKeyDown={(event) => {
                   if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
                   event.preventDefault();
@@ -207,6 +264,17 @@ export default function LibraryTab() {
                 }}
                 onContextMenu={(event) => openContextMenu(event, menuFor(file))}
               >
+                <button
+                  type="button"
+                  className={cn('file-card-check', selected.has(file.path) && 'file-card-check-on')}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleSelected(file.path);
+                  }}
+                  title={selected.has(file.path) ? 'Deselect' : 'Select (Ctrl + click)'}
+                >
+                  {selected.has(file.path) ? <CheckSquare size={15} /> : <Square size={15} />}
+                </button>
                 <div className={cn('file-card-icon', meta.tone)}>{meta.icon}</div>
                 <div className="file-card-body">
                   <div className="file-card-name" dir="auto" title={file.name}>

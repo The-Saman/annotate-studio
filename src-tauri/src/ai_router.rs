@@ -80,6 +80,7 @@ pub struct ProviderInfo {
     pub model: String,
     pub endpoint: Option<String>,
     pub active: bool,
+    pub capabilities: crate::ai_models::ModelCapabilities,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -222,7 +223,7 @@ impl AIProvider {
         }
     }
 
-    fn api_key(&self) -> Option<&str> {
+    pub(crate) fn api_key(&self) -> Option<&str> {
         match self {
             AIProvider::Ollama { .. } => None,
             AIProvider::OpenAI { api_key, .. }
@@ -239,7 +240,7 @@ impl AIProvider {
         }
     }
 
-    fn openai_compatible_url(&self) -> Option<String> {
+    pub(crate) fn openai_compatible_url(&self) -> Option<String> {
         let fixed = match self {
             AIProvider::OpenAI { .. } => "https://api.openai.com/v1/chat/completions",
             AIProvider::DeepSeek { .. } => "https://api.deepseek.com/chat/completions",
@@ -278,7 +279,7 @@ impl Default for AIRouter {
     }
 }
 
-fn error_message(body: &str) -> String {
+pub(crate) fn error_message(body: &str) -> String {
     let parsed = serde_json::from_str::<Value>(body).ok();
     let message = parsed.as_ref().and_then(|value| {
         value
@@ -292,7 +293,7 @@ fn error_message(body: &str) -> String {
     truncate_chars(&text, 400).to_string()
 }
 
-fn content_text(value: &Value) -> String {
+pub(crate) fn content_text(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         Value::Array(parts) => parts
@@ -386,6 +387,20 @@ impl AIRouter {
                 model: provider.model_name().to_string(),
                 endpoint: provider.endpoint().map(str::to_string),
                 active: index == 0,
+                capabilities: crate::ai_models::infer_capabilities(
+                    provider.type_name(),
+                    provider.model_name(),
+                ),
+            })
+            .collect()
+    }
+
+    pub fn infos_with(&self, registry: &crate::ai_models::ModelRegistry) -> Vec<ProviderInfo> {
+        self.infos()
+            .into_iter()
+            .map(|mut info| {
+                info.capabilities = registry.capabilities(&info.provider_type, &info.model);
+                info
             })
             .collect()
     }
@@ -424,7 +439,7 @@ impl AIRouter {
         crate::storage::write_private_json(path, &self.providers)
     }
 
-    fn find(&self, selector: Option<&str>) -> Option<&AIProvider> {
+    pub(crate) fn find(&self, selector: Option<&str>) -> Option<&AIProvider> {
         let selector = selector.map(str::trim).filter(|s| !s.is_empty());
         match selector {
             Some(sel) => self

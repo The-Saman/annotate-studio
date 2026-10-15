@@ -3,9 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::ai_models::ModelRegistry;
 use crate::ai_router::AIRouter;
 use crate::analytics::Analytics;
 use crate::paths::Workspace;
+use crate::search_index::{index_dir, SearchIndex};
 use crate::spaced_repetition::{ReviewQuality, SpacedRepetitionEngine};
 use crate::storage::read_json;
 
@@ -17,6 +19,7 @@ pub struct DataPaths {
     pub settings: PathBuf,
     pub exams: PathBuf,
     pub providers: PathBuf,
+    pub model_info: PathBuf,
     pub collections: PathBuf,
     pub flashcards: PathBuf,
     pub chat_sessions: PathBuf,
@@ -33,6 +36,7 @@ impl DataPaths {
             settings: workspace.join("settings.json"),
             exams: workspace.join("exams_data.json"),
             providers: workspace.join("providers.json"),
+            model_info: workspace.join("model_info.json"),
             collections: workspace.join("collections.json"),
             flashcards: workspace.join("flashcards.json"),
             chat_sessions: workspace.join("chat_sessions.json"),
@@ -123,6 +127,9 @@ pub struct AppState {
     pub workspace: Workspace,
     pub paths: DataPaths,
     pub ai_router: Mutex<AIRouter>,
+    pub models: Mutex<ModelRegistry>,
+    pub stream_client: reqwest::Client,
+    pub search_index: Mutex<SearchIndex>,
     pub flashcards: Mutex<SpacedRepetitionEngine>,
     pub analytics: Analytics,
     pub generations: Generations,
@@ -160,11 +167,16 @@ impl AppState {
         ai_router.load_from_disk(&paths.providers);
 
         let analytics = Analytics::new(paths.analytics_dir.clone());
+        let models = ModelRegistry::load(&paths.model_info);
+        let search_index = SearchIndex::new(index_dir(workspace.root()));
 
         Ok(Self {
             workspace,
             paths,
             ai_router: Mutex::new(ai_router),
+            models: Mutex::new(models),
+            stream_client: crate::ai_turn::streaming_client(),
+            search_index: Mutex::new(search_index),
             flashcards: Mutex::new(flashcards),
             analytics,
             generations: Generations::default(),
@@ -176,6 +188,14 @@ impl AppState {
             let mut engine = self.flashcards.lock().map_err(lock_error)?;
             engine.reload();
             migrate_card_qualities(&mut engine, &self.paths.legacy_card_qualities);
+        }
+        {
+            let mut models = self.models.lock().map_err(lock_error)?;
+            *models = ModelRegistry::load(&self.paths.model_info);
+        }
+        {
+            let mut index = self.search_index.lock().map_err(lock_error)?;
+            *index = SearchIndex::new(index_dir(self.workspace.root()));
         }
         let mut router = self.ai_router.lock().map_err(lock_error)?;
         *router = AIRouter::new();

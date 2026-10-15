@@ -2,10 +2,13 @@ use serde::Serialize;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::ai_json::parse_flashcards;
+use crate::ai_models::{list_models, ModelCapabilities, ModelInfo};
 use crate::ai_router::{AIProvider, AIResponse, AIRouter, ChatMessage, ChatOptions, ProviderInfo};
+use crate::ai_turn::{TurnEvent, TurnRequest, TurnResponse, TurnRunner};
 use crate::spaced_repetition::Flashcard;
 use crate::state::{lock_error, AppState};
 use crate::text::{chunk_text, looks_binary, preview, text_from_file};
@@ -284,12 +287,92 @@ pub fn cancel_generation(state: State<'_, AppState>, request_id: Option<String>)
     state.generations.cancel(request_id.as_deref());
 }
 
-#[tauri::command(async)]
-pub fn get_ai_providers(state: State<'_, AppState>) -> Result<Vec<ProviderInfo>, String> {
-    Ok(state.ai_router.lock().map_err(lock_error)?.infos())
+fn provider_infos(state: &AppState, router: &AIRouter) -> Result<Vec<ProviderInfo>, String> {
+    let models = state.models.lock().map_err(lock_error)?;
+    Ok(router.infos_with(&models))
 }
 
 #[tauri::command(async)]
+pub fn get_ai_providers(state: State<'_, AppState>) -> Result<Vec<ProviderInfo>, String> {
+    let router = state.ai_router.lock().map_err(lock_error)?;
+    provider_infos(&state, &router)
+}
+
+#[tauri::command]
+pub async fn ai_turn(
+    state: State<'_, AppState>,
+    request: TurnRequest,
+    on_event: Channel<TurnEvent>,
+) -> Result<TurnResponse, String> {
+    let router = router_snapshot(&state)?;
+    let provider = router
+        .find(request.model.as_deref())
+        .cloned()
+        .ok_or_else(|| {
+            "No AI provider is configured. Add one in Settings → AI providers.".to_string()
+        })?;
+    let request_id = request
+        .request_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let generation = state.generations.begin(&request_id);
+    let client = state.stream_client.clone();
+    let runner = TurnRunner {
+        client: &client,
+        cancel: generation.flag(),
+    };
+    let mut emit = |event: TurnEvent| {
+        let _ = on_event.send(event);
+    };
+    runner.run(&provider, &request, &mut emit).await
+}
+
+#[tauri::command]
+pub async fn list_provider_models(
+    state: State<'_, AppState>,
+    provider_type: String,
+    api_key: Option<String>,
+    endpoint: Option<String>,
+    provider_id: Option<String>,
+) -> Result<Vec<ModelInfo>, String> {
+    let mut key = api_key.filter(|k| !k.trim().is_empty());
+    let mut endpoint = endpoint.filter(|e| !e.trim().is_empty());
+    if key.is_none() || endpoint.is_none() {
+        let router = router_snapshot(&state)?;
+        let stored = router.providers().iter().find(|p| {
+            provider_id.as_deref().is_some_and(|id| p.id() == id)
+                || (provider_id.is_none() && p.type_name() == provider_type)
+        });
+        if let Some(provider) = stored.filter(|p| p.type_name() == provider_type) {
+            if key.is_none() {
+                key = provider.api_key().map(str::to_string);
+            }
+            if endpoint.is_none() {
+                endpoint = provider.endpoint().map(str::to_string);
+            }
+        }
+    }
+    list_models(&provider_type, key.as_deref(), endpoint.as_deref()).await
+}
+
+#[tauri::command(async)]
+pub fn set_model_capabilities(
+    state: State<'_, AppState>,
+    id: String,
+    capabilities: ModelCapabilities,
+) -> Result<Vec<ProviderInfo>, String> {
+    {
+        let mut models = state.models.lock().map_err(lock_error)?;
+        models.entries.insert(id, capabilities);
+        models.save(&state.paths.model_info)?;
+    }
+    let router = state.ai_router.lock().map_err(lock_error)?;
+    provider_infos(&state, &router)
+}
+
+#[tauri::command(async)]
+#[allow(clippy::too_many_arguments)]
 pub fn add_ai_provider(
     state: State<'_, AppState>,
     provider_type: String,
@@ -297,16 +380,23 @@ pub fn add_ai_provider(
     endpoint: Option<String>,
     model: Option<String>,
     make_default: Option<bool>,
+    capabilities: Option<ModelCapabilities>,
 ) -> Result<Vec<ProviderInfo>, String> {
     let provider = AIProvider::from_config(&provider_type, api_key, endpoint, model)?;
     let model_name = provider.model_name().to_string();
+    let id = provider.id();
+    if let Some(capabilities) = capabilities {
+        let mut models = state.models.lock().map_err(lock_error)?;
+        models.entries.insert(id, capabilities);
+        models.save(&state.paths.model_info)?;
+    }
     let mut router = state.ai_router.lock().map_err(lock_error)?;
     router.add_provider(provider);
     if make_default.unwrap_or(false) {
         router.set_default(&provider_type, Some(&model_name));
     }
     save_router(&state, &router)?;
-    Ok(router.infos())
+    provider_infos(&state, &router)
 }
 
 #[tauri::command(async)]
@@ -318,7 +408,7 @@ pub fn remove_ai_provider(
     let mut router = state.ai_router.lock().map_err(lock_error)?;
     router.remove(&provider_type, model.as_deref());
     save_router(&state, &router)?;
-    Ok(router.infos())
+    provider_infos(&state, &router)
 }
 
 #[tauri::command(async)]
@@ -330,7 +420,7 @@ pub fn set_default_ai_provider(
     let mut router = state.ai_router.lock().map_err(lock_error)?;
     router.set_default(&provider_type, model.as_deref());
     save_router(&state, &router)?;
-    Ok(router.infos())
+    provider_infos(&state, &router)
 }
 
 #[tauri::command]

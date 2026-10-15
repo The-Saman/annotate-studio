@@ -12,7 +12,9 @@ import ModelPicker from '@/components/ui/ModelPicker';
 import { useApp } from '@/store/app';
 import { useChatSessions, type ChatMessage } from '@/store/sessions';
 import { useSettings } from '@/store/settings';
+import { useLibrary } from '@/store/library';
 import { clamp } from '@/lib/utils';
+import { splitLesson } from '@/lib/ai';
 
 const EMPTY: ChatMessage[] = [];
 
@@ -58,7 +60,7 @@ export default function ChatPanel({ visible }: { visible: boolean }) {
   useEffect(() => {
     if (queued === 0) return;
     const next = useApp.getState().chatQueue[0];
-    if (!next || (next.kind !== 'draft' && engine.isBusy())) return;
+    if (!next || (next.kind !== 'draft' && next.kind !== 'walkthrough' && !(next.kind === 'agent' && !next.send) && engine.isBusy())) return;
     const request = useApp.getState().consumeChatRequest();
     if (!request) return;
     switch (request.kind) {
@@ -73,6 +75,17 @@ export default function ChatPanel({ visible }: { visible: boolean }) {
       case 'explain':
         void engine.explain(request.topic, { context: request.context, path: request.path });
         break;
+      case 'walkthrough':
+        engine.openLesson(request.title, splitLesson(request.markdown));
+        break;
+      case 'agent': {
+        engine.setLesson(null);
+        const files = useLibrary.getState().files.filter((file) => request.paths.includes(file.path));
+        engine.addAttachments(files);
+        if (request.send) void engine.send(request.text);
+        else requestAnimationFrame(() => composerRef.current?.setDraft(request.text));
+        break;
+      }
       case 'flashcards':
         engine.setLesson(null);
         void engine.makeFlashcards({
@@ -151,11 +164,16 @@ export default function ChatPanel({ visible }: { visible: boolean }) {
               if (!engine.isBusy()) void engine.retry(id);
             }}
             onOpenLesson={engine.openLesson}
+            onChallenge={(id) => {
+              if (!engine.isBusy()) void engine.challenge(id);
+            }}
+            onUndo={(messageId, stepId) => void engine.undoStep(messageId, stepId)}
+            canUndo={engine.canUndo}
             emptyHint={
               <>
                 <Bot size={30} strokeWidth={1.5} />
-                <strong>Study assistant</strong>
-                <span>Ask a question, type @ to attach a PDF or note, or select text in a PDF and choose “Ask AI”.</span>
+                <strong>Study agent</strong>
+                <span>Ask about anything in your workspace or give it a task: “make a booklet from these PDFs”, “turn this Lean proof into a proof”, “add flashcards for chapter 2”. Type @ to point at a file and / for commands.</span>
               </>
             }
           />

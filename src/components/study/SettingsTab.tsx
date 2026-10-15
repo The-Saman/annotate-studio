@@ -2,6 +2,8 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Bot,
+  Brain,
   Check,
   CheckCircle2,
   Circle,
@@ -9,16 +11,20 @@ import {
   Cpu,
   Database,
   Download,
+  Eye,
   Keyboard,
+  ListFilter,
   Loader2,
   Monitor,
   Palette,
   PlugZap,
+  RefreshCw,
   Sigma,
   Trash2,
   Upload,
   Wifi,
   WifiOff,
+  Wrench,
 } from 'lucide-react';
 import {
   addAIProvider,
@@ -28,29 +34,35 @@ import {
   getDataDir,
   importData,
   isTauri,
+  listProviderModels,
   removeAIProvider,
   reserveCommands,
   setDefaultAIProvider,
+  setModelCapabilities,
   testAIProvider,
+  type ModelCapabilities,
+  type ModelInfo,
   type ProviderInfo,
   type TexEngine as DetectedEngine,
 } from '@/lib/tauri-commands';
 import { flushAll } from '@/lib/persist';
 import { copyText, cn } from '@/lib/utils';
+import { normalizeForSearch } from '@/lib/bidi';
 import { renderMath } from '@/lib/math-render';
 import { collectMacros } from '@/lib/latex';
-import { TEX_ENGINES, THEME_IDS, useSettings, type TexEngine, type ThemeMode } from '@/store/settings';
+import { REASONING_EFFORTS, TEX_ENGINES, THEME_IDS, useSettings, type ReasoningEffort, type TexEngine, type ThemeMode } from '@/store/settings';
 import { PROVIDER_LABELS, useProviders } from '@/store/providers';
 import { confirmDialog } from '@/store/dialogs';
 import { toast } from '@/store/toast';
 
-type Pane = 'appearance' | 'interface' | 'writing' | 'providers' | 'data' | 'shortcuts';
+type Pane = 'appearance' | 'interface' | 'writing' | 'providers' | 'assistant' | 'data' | 'shortcuts';
 
 const PANES: { id: Pane; label: string; icon: React.ReactNode }[] = [
   { id: 'appearance', label: 'Appearance', icon: <Palette size={16} /> },
   { id: 'interface', label: 'Interface', icon: <Monitor size={16} /> },
   { id: 'writing', label: 'Writing & math', icon: <Sigma size={16} /> },
   { id: 'providers', label: 'AI providers', icon: <Cpu size={16} /> },
+  { id: 'assistant', label: 'Assistant', icon: <Bot size={16} /> },
   { id: 'data', label: 'Data & backup', icon: <Database size={16} /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={16} /> },
 ];
@@ -106,8 +118,54 @@ const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: '\\ in math', action: 'LaTeX command suggestions with a live preview' },
   { keys: 'Ctrl + Shift + 2', action: 'Insert a zero-width non-joiner (نیم‌فاصله)' },
   { keys: 'Double-click a formula', action: 'Open the formula enlarged' },
+  { keys: '@ / in the assistant', action: 'Attach a file / show commands such as /booklet, /ocr, /lean' },
   { keys: 'Space, 1–4', action: 'Flip card and rate it while reviewing flashcards' },
 ];
+
+function CapabilityBadges({ capabilities }: { capabilities: ModelCapabilities }) {
+  const window = capabilities.contextWindow;
+  return (
+    <span className="cap-badges">
+      {capabilities.vision && (
+        <span className="cap-badge cap-vision" title="Can read images (OCR, figures)">
+          <Eye size={10} /> Vision
+        </span>
+      )}
+      {capabilities.tools && (
+        <span className="cap-badge cap-tools" title="Can use tools (agent)">
+          <Wrench size={10} /> Tools
+        </span>
+      )}
+      {capabilities.reasoning && (
+        <span className="cap-badge cap-reasoning" title="Reasoning model">
+          <Brain size={10} /> Reasoning
+        </span>
+      )}
+      {window ? <span className="cap-badge">{window >= 1_000_000 ? `${Math.round(window / 100_000) / 10}M` : `${Math.round(window / 1000)}k`}</span> : null}
+    </span>
+  );
+}
+
+function CapabilityEditor({ provider, onChange }: { provider: ProviderInfo; onChange: (providers: ProviderInfo[]) => void }) {
+  const toggle = async (key: 'vision' | 'tools' | 'reasoning') => {
+    const next = { ...provider.capabilities, [key]: !provider.capabilities[key] };
+    try {
+      onChange(await setModelCapabilities(provider.id, next));
+    } catch (error) {
+      toast.error('Could not save', error);
+    }
+  };
+  return (
+    <span className="cap-editor">
+      {(['vision', 'tools', 'reasoning'] as const).map((key) => (
+        <label key={key} className="cap-toggle" title={`Mark ${provider.model} as ${provider.capabilities[key] ? 'not ' : ''}supporting ${key}`}>
+          <input type="checkbox" checked={provider.capabilities[key] === true} onChange={() => void toggle(key)} />
+          {key}
+        </label>
+      ))}
+    </span>
+  );
+}
 
 function ProvidersPane() {
   const providers = useProviders((state) => state.providers);
@@ -121,6 +179,11 @@ function ProvidersPane() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [ollama, setOllama] = useState<boolean | null>(null);
+  const [catalog, setCatalog] = useState<ModelInfo[] | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [filter, setFilter] = useState('');
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [editing, setEditing] = useState<string | null>(null);
 
   useEffect(() => {
     void refresh();
@@ -129,6 +192,7 @@ function ProvidersPane() {
 
   const needsKey = type !== 'ollama';
   const hasEndpoint = type === 'ollama' || type === 'openrouter';
+  const existing = providers.find((p) => p.type === type);
 
   const test = async (id: string) => {
     setTesting(id);
@@ -142,6 +206,26 @@ function ProvidersPane() {
     }
   };
 
+  const fetchModels = async () => {
+    if (needsKey && !apiKey.trim() && !existing) {
+      toast.warning('Enter an API key first');
+      return;
+    }
+    setFetching(true);
+    try {
+      const list = await listProviderModels(type, apiKey.trim() || undefined, endpoint.trim() || undefined, apiKey.trim() ? undefined : existing?.id);
+      setCatalog(list);
+      setPicked(new Set());
+      if (list.length === 0) toast.warning('No chat models were found');
+    } catch (error) {
+      toast.error('Could not fetch models', error);
+    } finally {
+      setFetching(false);
+    }
+  };
+
+  const keyFor = () => apiKey.trim() || undefined;
+
   const save = async (andTest: boolean) => {
     if (needsKey && !apiKey.trim()) {
       toast.warning('Enter an API key first');
@@ -149,12 +233,25 @@ function ProvidersPane() {
     }
     setSaving(true);
     try {
-      const next = await addAIProvider(type, apiKey.trim() || undefined, endpoint.trim() || undefined, model.trim() || undefined, makeDefault || providers.length === 0);
+      const chosen = picked.size > 0 && catalog ? catalog.filter((entry) => picked.has(entry.id)) : null;
+      let next = providers;
+      if (chosen && chosen.length > 0) {
+        for (const [index, entry] of chosen.entries()) {
+          next = await addAIProvider(type, keyFor(), endpoint.trim() || undefined, entry.id, index === 0 && (makeDefault || providers.length === 0), entry.capabilities);
+        }
+      } else {
+        const typed = model.trim();
+        const fromCatalog = catalog?.find((entry) => entry.id === typed);
+        next = await addAIProvider(type, keyFor(), endpoint.trim() || undefined, typed || undefined, makeDefault || providers.length === 0, fromCatalog?.capabilities);
+      }
       setProviders(next);
-      const added = next.find((p) => p.type === type && (!model.trim() || p.model === model.trim())) ?? next[next.length - 1];
-      toast.success('Provider saved', added ? `${PROVIDER_LABELS[added.type] ?? added.type} · ${added.model}` : undefined);
+      const added = chosen?.length
+        ? next.find((p) => p.type === type && p.model === chosen[0].id)
+        : next.find((p) => p.type === type && (!model.trim() || p.model === model.trim())) ?? next[next.length - 1];
+      toast.success(chosen && chosen.length > 1 ? `${chosen.length} models saved` : 'Provider saved', added ? `${PROVIDER_LABELS[added.type] ?? added.type} · ${added.model}` : undefined);
       setApiKey('');
       setModel('');
+      setPicked(new Set());
       if (andTest && added) await test(added.id);
     } catch (error) {
       toast.error('Could not save the provider', error);
@@ -172,6 +269,12 @@ function ProvidersPane() {
       toast.error('Could not remove the provider', error);
     }
   };
+
+  const visible = useMemo(() => {
+    if (!catalog) return [];
+    const query = normalizeForSearch(filter);
+    return catalog.filter((entry) => !query || normalizeForSearch(`${entry.id} ${entry.name ?? ''}`).includes(query)).slice(0, 300);
+  }, [catalog, filter]);
 
   return (
     <div className="settings-section">
@@ -206,7 +309,11 @@ function ProvidersPane() {
                     {provider.endpoint ? ` · ${provider.endpoint}` : ''}
                     {provider.active ? ' · default' : ''}
                   </span>
+                  {editing === provider.id ? <CapabilityEditor provider={provider} onChange={setProviders} /> : <CapabilityBadges capabilities={provider.capabilities ?? {}} />}
                 </div>
+                <button type="button" className={cn('icon-btn', editing === provider.id && 'tool-btn-active')} onClick={() => setEditing(editing === provider.id ? null : provider.id)} title="Correct what this model supports">
+                  <ListFilter size={15} />
+                </button>
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => void test(provider.id)} disabled={testing !== null}>
                   {testing === provider.id ? <Loader2 size={13} className="spin" /> : <PlugZap size={13} />} Test
                 </button>
@@ -220,7 +327,7 @@ function ProvidersPane() {
       </div>
 
       <div className="settings-card">
-        <h3>Add a model</h3>
+        <h3>Add models</h3>
         <div className="chip-row">
           {PROVIDER_ORDER.map((id) => (
             <button
@@ -231,6 +338,8 @@ function ProvidersPane() {
                 setType(id);
                 setEndpoint('');
                 setModel('');
+                setCatalog(null);
+                setPicked(new Set());
               }}
             >
               {PROVIDER_LABELS[id] ?? id}
@@ -240,7 +349,7 @@ function ProvidersPane() {
         <div className="form-grid form-grid-2">
           {needsKey && (
             <label className="field field-wide">
-              <span className="field-label">API key</span>
+              <span className="field-label">API key{existing ? ' (leave empty to reuse the saved key for fetching models)' : ''}</span>
               <input className="input mono" type="password" value={apiKey} autoComplete="off" onChange={(event) => setApiKey(event.target.value)} placeholder={`${PROVIDER_LABELS[type] ?? type} API key`} />
             </label>
           )}
@@ -257,8 +366,44 @@ function ProvidersPane() {
           )}
           <label className="field field-wide">
             <span className="field-label">Model</span>
-            <input className="input mono" value={model} onChange={(event) => setModel(event.target.value)} placeholder={MODEL_HINTS[type] ?? 'model name'} />
+            <div className="input-with-button">
+              <input className="input mono" value={model} onChange={(event) => setModel(event.target.value)} placeholder={MODEL_HINTS[type] ?? 'model name'} />
+              <button type="button" className="btn btn-secondary" onClick={() => void fetchModels()} disabled={fetching}>
+                {fetching ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />} Fetch models
+              </button>
+            </div>
           </label>
+          {catalog && (
+            <div className="field-wide model-catalog">
+              <div className="model-catalog-head">
+                <input className="input" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={`Filter ${catalog.length} models…`} />
+                <span className="muted">{picked.size > 0 ? `${picked.size} selected` : 'Pick one or more'}</span>
+              </div>
+              <div className="model-catalog-list">
+                {visible.map((entry) => (
+                  <label key={entry.id} className={cn('model-option', picked.has(entry.id) && 'model-option-on')}>
+                    <input
+                      type="checkbox"
+                      checked={picked.has(entry.id)}
+                      onChange={() =>
+                        setPicked((current) => {
+                          const next = new Set(current);
+                          if (next.has(entry.id)) next.delete(entry.id);
+                          else next.add(entry.id);
+                          return next;
+                        })
+                      }
+                    />
+                    <span className="model-option-name">
+                      <strong className="mono">{entry.id}</strong>
+                      {entry.name && <small>{entry.name}</small>}
+                    </span>
+                    <CapabilityBadges capabilities={entry.capabilities} />
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
           <label className="checkbox-row field-wide">
             <input type="checkbox" checked={makeDefault} onChange={(event) => setMakeDefault(event.target.checked)} />
             Use as the default model
@@ -266,11 +411,101 @@ function ProvidersPane() {
         </div>
         <div className="button-row">
           <button type="button" className="btn btn-primary" onClick={() => void save(false)} disabled={saving}>
-            {saving ? <Loader2 size={15} className="spin" /> : <Check size={15} />} Save
+            {saving ? <Loader2 size={15} className="spin" /> : <Check size={15} />} {picked.size > 1 ? `Save ${picked.size} models` : 'Save'}
           </button>
           <button type="button" className="btn btn-secondary" onClick={() => void save(true)} disabled={saving}>
             <PlugZap size={15} /> Save and test
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RoleSelect({ label, hint, value, onChange, providers, require }: {
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (value: string) => void;
+  providers: ProviderInfo[];
+  require?: 'vision' | 'reasoning';
+}) {
+  return (
+    <label className="field field-wide">
+      <span className="field-label">{label}</span>
+      <select className="input" value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">{hint}</option>
+        {providers.map((provider) => (
+          <option key={provider.id} value={provider.id}>
+            {provider.model} · {PROVIDER_LABELS[provider.type] ?? provider.type}
+            {require && provider.capabilities?.[require] ? ` · ${require}` : ''}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function AssistantPane() {
+  const providers = useProviders((state) => state.providers);
+  const refresh = useProviders((state) => state.refresh);
+  const selectedModel = useSettings((state) => state.selectedModel);
+  const reasoningModel = useSettings((state) => state.reasoningModel);
+  const visionModel = useSettings((state) => state.visionModel);
+  const agent = useSettings((state) => state.agent);
+  const update = useSettings((state) => state.update);
+  const updateAgent = useSettings((state) => state.updateAgent);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const visionCapable = providers.filter((p) => p.capabilities?.vision);
+
+  return (
+    <div className="settings-section">
+      <h2>Assistant</h2>
+      <p className="muted">Give the assistant two brains: a fast routine model that manages files, notes and flashcards, and a stronger reasoning model for proofs, papers and deep questions.</p>
+      <div className="settings-card">
+        <h3>Model roles</h3>
+        <div className="form-grid">
+          <RoleSelect label="Routine model" hint="Default model" value={selectedModel} onChange={(value) => update({ selectedModel: value })} providers={providers} />
+          <RoleSelect label="Reasoning model" hint="Same as the routine model" value={reasoningModel} onChange={(value) => update({ reasoningModel: value })} providers={providers} require="reasoning" />
+          <RoleSelect label="Vision model (OCR, images)" hint="Automatic: the first model that can read images" value={visionModel} onChange={(value) => update({ visionModel: value })} providers={providers} require="vision" />
+        </div>
+        {visionCapable.length === 0 && providers.length > 0 && (
+          <p className="muted">None of your models is marked as able to read images. Fetch models in AI providers, or mark a model with “vision” there, to enable OCR of scanned files.</p>
+        )}
+      </div>
+      <div className="settings-card">
+        <h3>Agent</h3>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={agent.enabled} onChange={(event) => updateAgent({ enabled: event.target.checked })} />
+          Let the assistant search, read and organize the whole workspace by itself
+        </label>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={agent.allowWrites} onChange={(event) => updateAgent({ allowWrites: event.target.checked })} />
+          Allow it to create and edit notes, flashcards and exams
+        </label>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={agent.confirmEdits} disabled={!agent.allowWrites} onChange={(event) => updateAgent({ confirmEdits: event.target.checked })} />
+          Ask me before it changes an existing note
+        </label>
+        <div className="form-grid form-grid-2">
+          <label className="field">
+            <span className="field-label">Maximum steps per request</span>
+            <input className="input" type="number" min={4} max={120} value={agent.maxSteps} onChange={(event) => updateAgent({ maxSteps: Math.max(4, Math.min(120, Number(event.target.value) || 30)) })} />
+          </label>
+          <label className="field">
+            <span className="field-label">Thinking effort for “Think deeper”</span>
+            <select className="input" value={agent.deepEffort} onChange={(event) => updateAgent({ deepEffort: event.target.value as ReasoningEffort })}>
+              {REASONING_EFFORTS.map((effort) => (
+                <option key={effort} value={effort}>
+                  {effort.charAt(0).toUpperCase() + effort.slice(1)}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       </div>
     </div>
@@ -551,6 +786,7 @@ export default function SettingsTab() {
 
         {pane === 'writing' && <WritingPane />}
         {pane === 'providers' && <ProvidersPane />}
+        {pane === 'assistant' && <AssistantPane />}
         {pane === 'data' && <DataPane />}
 
         {pane === 'shortcuts' && (

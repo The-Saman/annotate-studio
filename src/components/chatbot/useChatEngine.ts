@@ -3,30 +3,33 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   aiChat,
+  aiTurn,
   cancelGeneration,
   errorMessage,
   generateFlashcards,
   onGenerationProgress,
-  type ChatMessagePayload,
   type StudyFile,
+  type TurnMessage,
 } from '@/lib/tauri-commands';
-import {
-  attachmentBlock,
-  EXPLAINER_PROMPT,
-  splitLesson,
-  STUDY_ASSISTANT_PROMPT,
-  SUMMARY_PROMPT,
-  trimHistory,
-  wantsFlashcards,
-} from '@/lib/ai';
+import { attachmentBlock, EXPLAINER_PROMPT, splitLesson, SUMMARY_PROMPT, wantsFlashcards } from '@/lib/ai';
 import { hasReadableText } from '@/lib/pdf-engine';
 import { readDocumentText } from '@/lib/workspace-actions';
 import { baseName, stripExtension, uid } from '@/lib/utils';
+import { normalizeForSearch } from '@/lib/bidi';
+import { AGENT_PROMPT, CHAT_PROMPT, CRITIC_PROMPT, DEEP_THINKING_PROMPT, PRESETS } from '@/lib/agent/prompts';
+import { ensureProviders, inputBudget, modelFor, canSeeImages } from '@/lib/agent/models';
+import { historyMessages, MEMORY_PROMPT, planHistory, text as textMessage } from '@/lib/agent/context';
+import { runAgent, type AgentStep } from '@/lib/agent/runner';
+import { revertUndo, toolsFor, type ToolContext } from '@/lib/agent/tools';
+import { makeBooklet } from '@/lib/agent/booklet';
+import { hasUndo, rememberUndo, takeUndo, workspaceManifest } from '@/lib/agent/workspace';
 import { useApp } from '@/store/app';
-import { useChatSessions, type ChatMessage, type ChatReplay } from '@/store/sessions';
+import { useChatSessions, type ChatReplay, type ChatStep } from '@/store/sessions';
 import { UNSORTED_ID, useFlashcards } from '@/store/flashcards';
 import { useLibrary } from '@/store/library';
 import { useSettings } from '@/store/settings';
+import { confirmDialog } from '@/store/dialogs';
+import { toast } from '@/store/toast';
 
 export interface Attachment {
   path: string;
@@ -42,6 +45,11 @@ export interface LessonState {
   asking: boolean;
 }
 
+export interface SendOptions {
+  deep?: boolean;
+  preset?: string;
+}
+
 interface CachedText {
   text: string;
   truncated: boolean;
@@ -50,6 +58,8 @@ interface CachedText {
 interface InflightRequest {
   id: number;
   sessionId: string;
+  requestId: string;
+  messageId?: string;
 }
 
 interface StoppedRequest {
@@ -57,20 +67,25 @@ interface StoppedRequest {
   messageId: string;
 }
 
-function toPayload(messages: ChatMessage[]): ChatMessagePayload[] {
-  return messages
-    .filter((message) => !message.error)
-    .map((message) => ({ role: message.role, content: message.content }));
-}
-
 export function findMentionedFiles(text: string, files: StudyFile[]): StudyFile[] {
   const found = new Map<string, StudyFile>();
-  const lower = text.toLowerCase();
+  const lower = normalizeForSearch(text);
   for (const file of files) {
-    const names = [file.name, stripExtension(file.name)].map((n) => `@${n.toLowerCase()}`);
+    const names = [file.name, stripExtension(file.name)].map((n) => `@${normalizeForSearch(n)}`);
     if (names.some((token) => lower.includes(token))) found.set(file.path, file);
   }
   return Array.from(found.values());
+}
+
+const SLASH = /^\/(\w+)\s*([\s\S]*)$/;
+
+function stepActions(steps: ChatStep[] | undefined): string | undefined {
+  if (!steps || steps.length === 0) return undefined;
+  return steps
+    .filter((step) => step.status === 'done')
+    .map((step) => `${step.label}${step.paths?.length ? ` (${step.paths.join(', ')})` : ''}`)
+    .slice(-12)
+    .join('; ');
 }
 
 export function useChatEngine() {
@@ -105,6 +120,22 @@ export function useChatEngine() {
   const model = () => useSettings.getState().selectedModel || undefined;
 
   const markStopped = (request: InflightRequest) => {
+    if (request.messageId) {
+      const session = useChatSessions.getState().sessions.find((s) => s.id === request.sessionId);
+      const message = session?.messages.find((m) => m.id === request.messageId);
+      if (message) {
+        useChatSessions.getState().updateMessage(request.sessionId, request.messageId, {
+          streaming: false,
+          status: undefined,
+          stopped: true,
+          content: message.content.trim() ? `${message.content}\n\n*(Stopped.)*` : 'Stopped before an answer arrived.',
+          error: !message.content.trim(),
+          steps: message.steps?.map((step) => (step.status === 'running' ? { ...step, status: 'error' as const, summary: 'Stopped' } : step)),
+        });
+        stopped.current.set(request.id, { sessionId: request.sessionId, messageId: request.messageId });
+        return;
+      }
+    }
     const messageId = useChatSessions.getState().appendMessage(request.sessionId, {
       role: 'assistant',
       content: 'Stopped before an answer arrived.',
@@ -122,7 +153,9 @@ export function useChatEngine() {
 
   const supersede = () => {
     if (!inflight.current) return;
-    markStopped(inflight.current);
+    const current = inflight.current;
+    markStopped(current);
+    void cancelGeneration(current.requestId).catch(() => undefined);
     inflight.current = null;
     requestRef.current += 1;
     stopGeneration();
@@ -131,7 +164,7 @@ export function useChatEngine() {
   const begin = (label: string, sessionId: string) => {
     supersede();
     const id = ++requestRef.current;
-    inflight.current = { id, sessionId };
+    inflight.current = { id, sessionId, requestId: uid() };
     setBusy(true);
     setStatus(label);
     return id;
@@ -196,13 +229,208 @@ export function useChatEngine() {
 
   const cancel = useCallback(() => {
     useApp.getState().clearChatQueue();
-    if (inflight.current) markStopped(inflight.current);
+    const current = inflight.current;
+    if (current) {
+      markStopped(current);
+      void cancelGeneration(current.requestId).catch(() => undefined);
+    }
     inflight.current = null;
     requestRef.current += 1;
     setBusy(false);
     setStatus(null);
     stopGeneration();
   }, []);
+
+  const streamInto = (sessionId: string, messageId: string, id: number) => {
+    let text = '';
+    let reasoning = '';
+    let steps: ChatStep[] = [];
+    let statusText: string | undefined;
+    let frame = 0;
+    const flush = () => {
+      frame = 0;
+      if (id !== requestRef.current) return;
+      useChatSessions.getState().updateMessage(sessionId, messageId, { content: text, reasoning: reasoning || undefined, steps: steps.length ? steps : undefined, status: statusText });
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(flush);
+    };
+    return {
+      text: (delta: string) => {
+        text += delta;
+        schedule();
+      },
+      reasoning: (delta: string) => {
+        reasoning += delta;
+        schedule();
+      },
+      step: (step: AgentStep) => {
+        const entry: ChatStep = { id: step.id, tool: step.tool, label: step.label, status: step.status, summary: step.summary, paths: step.paths, undoable: Boolean(step.undo) };
+        if (step.undo) rememberUndo(step.id, step.undo);
+        const index = steps.findIndex((existing) => existing.id === step.id);
+        steps = index >= 0 ? steps.map((existing, i) => (i === index ? entry : existing)) : [...steps, entry];
+        schedule();
+      },
+      status: (value: string | null) => {
+        statusText = value ?? undefined;
+        if (value) setStatus(value);
+        schedule();
+      },
+      snapshot: () => ({ text, reasoning, steps }),
+      cancelFrame: () => {
+        if (frame) cancelAnimationFrame(frame);
+        frame = 0;
+      },
+    };
+  };
+
+  const runAgentTurn = useCallback(
+    async (input: string, options: SendOptions, active: Attachment[]) => {
+      const sessions = useChatSessions.getState();
+      const sessionId = sessions.ensureSession();
+      const previous = sessions.sessions.find((s) => s.id === sessionId)?.messages ?? [];
+      const preset = options.preset ? PRESETS[options.preset] : undefined;
+      const deep = Boolean(options.deep || preset?.reasoning);
+      sessions.appendMessage(sessionId, {
+        role: 'user',
+        content: input,
+        attachments: active.map((a) => a.name),
+        replay: { kind: 'agent', text: input, deep: options.deep || undefined, preset: options.preset },
+      });
+      const id = begin(deep ? 'Thinking deeply…' : 'Thinking…', sessionId);
+      const request = inflight.current!;
+      await ensureProviders();
+      const settings = useSettings.getState();
+      const routine = modelFor('assistant');
+      const reasoner = modelFor('reasoning');
+      const vision = modelFor('vision');
+      const provider = deep ? reasoner ?? routine : routine;
+      const messageId = useChatSessions.getState().appendMessage(sessionId, {
+        role: 'assistant',
+        content: '',
+        streaming: true,
+        model: provider?.model,
+        mode: deep ? 'deep' : settings.agent.enabled ? 'agent' : 'chat',
+      });
+      request.messageId = messageId;
+      const sink = streamInto(sessionId, messageId, id);
+      try {
+        if (!provider) throw new Error('No AI provider is configured. Add one in Settings → AI providers.');
+        const agentMode = settings.agent.enabled;
+        const budget = inputBudget(provider);
+        const memory = useChatSessions.getState().sessions.find((entry) => entry.id === sessionId)?.memory;
+        const entries = previous.map((m) => ({ id: m.id, role: m.role, content: m.content, error: m.error, actions: stepActions(m.steps) }));
+        let plan = planHistory(entries, memory, Math.floor(budget * 0.35));
+        if (plan.fold.length > 0) {
+          sink.status('Condensing the earlier conversation…');
+          const transcript = plan.fold
+            .map((entry) => `${entry.role === 'user' ? 'Learner' : 'Assistant'}: ${entry.content}${entry.actions ? ` [Actions: ${entry.actions}]` : ''}`)
+            .join('\n\n');
+          try {
+            const condensed = await aiTurn({
+              model: (routine ?? provider).id,
+              requestId: request.requestId,
+              maxTokens: 1500,
+              temperature: 0.2,
+              messages: [
+                textMessage('system', MEMORY_PROMPT),
+                textMessage('user', `${plan.summary ? `Previous summary:\n${plan.summary}\n\n` : ''}Conversation to add:\n${transcript.slice(-120_000)}`),
+              ],
+            });
+            const summary = condensed.content.trim();
+            if (summary) {
+              useChatSessions.getState().setMemory(sessionId, { summary, lastId: plan.fold[plan.fold.length - 1].id });
+              plan = { fold: [], recent: plan.recent, summary };
+            }
+          } catch (error) {
+            if (id !== requestRef.current) throw error;
+            plan = { ...plan, fold: [] };
+          }
+        }
+        const history = historyMessages(plan);
+        const focus = active.map((a) => a.path);
+        let userText = preset ? `${preset.instruction}\n\n${input}` : input;
+        let system = agentMode ? AGENT_PROMPT : CHAT_PROMPT;
+        if (deep) system += `\n\n${DEEP_THINKING_PROMPT}`;
+        if (agentMode) {
+          const manifest = await workspaceManifest(focus);
+          system += `\n\nToday is ${new Date().toISOString().slice(0, 10)}. Model roles: routine ${routine?.model ?? 'none'}, reasoning ${reasoner?.model ?? 'none'}, vision ${vision?.model ?? 'none'}.\n\nWorkspace files\n${manifest}`;
+          if (focus.length) userText += `\n\n[Attached files: ${focus.join(', ')}]`;
+        } else if (active.length) {
+          const context = await buildContext(active);
+          if (context) userText = `${context}\n\n${userText}`;
+        }
+        if (id !== requestRef.current) return;
+        const messages: TurnMessage[] = [textMessage('system', system), ...history, textMessage('user', userText)];
+        const context: ToolContext = {
+          requestId: request.requestId,
+          readPaths: new Set(),
+          createdPaths: new Set(),
+          allowWrites: settings.agent.allowWrites,
+          confirmEdits: settings.agent.confirmEdits,
+          visionModel: vision,
+          reasoningModel: reasoner,
+          reasoningEffort: settings.agent.deepEffort,
+          isCancelled: () => id !== requestRef.current,
+          onProgress: (text) => sink.status(text),
+          confirm: (title, message) => confirmDialog({ title, message, confirmLabel: 'Allow' }),
+          makeBooklet: (job) =>
+            makeBooklet({
+              ...job,
+              provider: routine ?? provider,
+              visionProvider: vision,
+              requestId: request.requestId,
+              isCancelled: () => id !== requestRef.current,
+              onProgress: (text) => sink.status(text),
+            }),
+        };
+        const tools = agentMode
+          ? toolsFor({ allowWrites: settings.agent.allowWrites, vision: canSeeImages(vision), reasoner: Boolean(reasoner && reasoner.id !== provider.id), booklet: true })
+          : [];
+        const result = await runAgent({
+          provider,
+          messages,
+          tools,
+          context,
+          maxSteps: settings.agent.maxSteps,
+          reasoning: deep ? settings.agent.deepEffort : undefined,
+          temperature: deep ? undefined : 0.4,
+          callbacks: {
+            onText: sink.text,
+            onReasoning: sink.reasoning,
+            onStep: sink.step,
+            onStatus: sink.status,
+          },
+        });
+        if (id !== requestRef.current) return;
+        sink.cancelFrame();
+        const snapshot = sink.snapshot();
+        const content = snapshot.text.trim() || result.content;
+        useChatSessions.getState().updateMessage(sessionId, messageId, {
+          content: content || '(No answer.)',
+          reasoning: snapshot.reasoning || result.reasoning || undefined,
+          steps: snapshot.steps.length ? snapshot.steps : undefined,
+          streaming: false,
+          status: undefined,
+        });
+      } catch (error) {
+        if (id !== requestRef.current) return;
+        sink.cancelFrame();
+        const snapshot = sink.snapshot();
+        useChatSessions.getState().updateMessage(sessionId, messageId, {
+          content: snapshot.text.trim() ? `${snapshot.text}\n\n${errorMessage(error)}` : errorMessage(error),
+          reasoning: snapshot.reasoning || undefined,
+          steps: snapshot.steps.length ? snapshot.steps.map((step) => (step.status === 'running' ? { ...step, status: 'error' as const } : step)) : undefined,
+          error: true,
+          streaming: false,
+          status: undefined,
+        });
+      } finally {
+        finish(id);
+      }
+    },
+    [],
+  );
 
   const makeFlashcards = useCallback(
     async (options: { instructions?: string; text?: string; path?: string; title?: string; announce?: string }) => {
@@ -232,7 +460,7 @@ export function useChatEngine() {
           material = document.text;
           source = baseName(options.path);
           if (!hasReadableText(material)) {
-            throw new Error(`${source} has no extractable text. Scanned PDFs and images are not supported.`);
+            throw new Error(`${source} has no extractable text. Use “OCR” in the library or ask the agent to transcribe it first.`);
           }
         }
         const active = attachmentsRef.current.filter((a) => a.enabled);
@@ -286,45 +514,120 @@ export function useChatEngine() {
   );
 
   const send = useCallback(
-    async (text: string) => {
-      const trimmed = text.trim();
+    async (text: string, options: SendOptions = {}) => {
+      let trimmed = text.trim();
       if (!trimmed) return;
       const mentioned = findMentionedFiles(trimmed, useLibrary.getState().files);
       const all = addAttachments(mentioned);
-      if (wantsFlashcards(trimmed)) {
+      const active = all.filter((a) => a.enabled);
+      const slash = SLASH.exec(trimmed);
+      let preset = options.preset;
+      if (slash) {
+        const command = slash[1].toLowerCase();
+        const rest = slash[2].trim();
+        if (command in PRESETS) {
+          preset = command;
+          trimmed = rest || PRESETS[command].description;
+        } else if (command === 'booklet' || command === 'jozve') {
+          const title = rest || 'Study booklet';
+          const files = active.map((a) => a.path);
+          trimmed = files.length
+            ? `Make a complete study booklet titled "${title}" from the attached files using make_booklet.`
+            : `Make a complete study booklet titled "${title}". Find the relevant files in the workspace first, then use make_booklet.`;
+        } else if (command === 'ocr') {
+          trimmed = active.length
+            ? `Transcribe the attached files with ocr_file${rest ? ` (${rest})` : ''}.`
+            : `Transcribe ${rest || 'the scanned files I mean'} with ocr_file.`;
+        } else if (command === 'flashcards') {
+          await makeFlashcards({ instructions: rest || 'Make flashcards from the attached material' });
+          return;
+        } else if (command === 'deep') {
+          trimmed = rest || trimmed;
+          options = { ...options, deep: true };
+        }
+      }
+      if (!preset && wantsFlashcards(trimmed) && !useSettings.getState().agent.enabled) {
         await makeFlashcards({ instructions: trimmed });
         return;
       }
-      supersede();
-      const sessions = useChatSessions.getState();
-      const sessionId = sessions.ensureSession();
-      const previous = sessions.sessions.find((s) => s.id === sessionId)?.messages ?? [];
-      const active = all.filter((a) => a.enabled);
-      sessions.appendMessage(sessionId, { role: 'user', content: trimmed, attachments: active.map((a) => a.name) });
-      const id = begin(active.length ? 'Reading attachments…' : 'Thinking…', sessionId);
-      try {
-        const context = await buildContext(active);
-        if (id !== requestRef.current) return;
-        setStatus('Thinking…');
-        const response = await aiChat(
-          [
-            { role: 'system', content: STUDY_ASSISTANT_PROMPT },
-            ...trimHistory(toPayload(previous)),
-            { role: 'user', content: context ? `${context}\n\n${trimmed}` : trimmed },
-          ],
-          { model: model() },
-        );
-        if (id !== requestRef.current) return;
-        useChatSessions.getState().appendMessage(sessionId, { role: 'assistant', content: response.content });
-      } catch (error) {
-        if (id !== requestRef.current) return;
-        useChatSessions.getState().appendMessage(sessionId, { role: 'assistant', content: errorMessage(error), error: true });
-      } finally {
-        finish(id);
-      }
+      await runAgentTurn(trimmed, { ...options, preset }, active);
     },
-    [addAttachments, makeFlashcards],
+    [addAttachments, makeFlashcards, runAgentTurn],
   );
+
+  const challenge = useCallback(async (messageId: string) => {
+    const sessions = useChatSessions.getState();
+    const session = sessions.sessions.find((s) => s.messages.some((m) => m.id === messageId));
+    if (!session) return;
+    const index = session.messages.findIndex((m) => m.id === messageId);
+    const answer = session.messages[index];
+    const question = [...session.messages.slice(0, index)].reverse().find((m) => m.role === 'user');
+    if (!answer) return;
+    sessions.appendMessage(session.id, { role: 'user', content: 'Challenge this answer' });
+    const id = begin('Looking for weaknesses…', session.id);
+    const request = inflight.current!;
+    await ensureProviders();
+    const provider = modelFor('reasoning') ?? modelFor('assistant');
+    const replyId = useChatSessions.getState().appendMessage(session.id, { role: 'assistant', content: '', streaming: true, model: provider?.model, mode: 'critique' });
+    request.messageId = replyId;
+    const sink = streamInto(session.id, replyId, id);
+    try {
+      if (!provider) throw new Error('No AI provider is configured.');
+      const response = await aiTurn(
+        {
+          model: provider.id,
+          requestId: request.requestId,
+          reasoning: useSettings.getState().agent.deepEffort,
+          maxTokens: 12_000,
+          messages: [
+            textMessage('system', CRITIC_PROMPT),
+            textMessage('user', `${question ? `Question:\n${question.content}\n\n` : ''}Answer to challenge:\n${answer.content}`),
+          ],
+        },
+        (event) => {
+          if (event.type === 'text') sink.text(event.delta);
+          else if (event.type === 'reasoning') sink.reasoning(event.delta);
+        },
+      );
+      if (id !== requestRef.current) return;
+      sink.cancelFrame();
+      const snapshot = sink.snapshot();
+      useChatSessions.getState().updateMessage(session.id, replyId, {
+        content: snapshot.text.trim() || response.content,
+        reasoning: snapshot.reasoning || response.reasoning || undefined,
+        streaming: false,
+        status: undefined,
+      });
+    } catch (error) {
+      if (id !== requestRef.current) return;
+      sink.cancelFrame();
+      useChatSessions.getState().updateMessage(session.id, replyId, { content: errorMessage(error), error: true, streaming: false, status: undefined });
+    } finally {
+      finish(id);
+    }
+  }, []);
+
+  const undoStep = useCallback(async (messageId: string, stepId: string) => {
+    const undo = takeUndo(stepId);
+    if (!undo) {
+      toast.warning('This change can no longer be undone');
+      return;
+    }
+    try {
+      await revertUndo(undo);
+      const sessions = useChatSessions.getState();
+      const session = sessions.sessions.find((s) => s.messages.some((m) => m.id === messageId));
+      const message = session?.messages.find((m) => m.id === messageId);
+      if (session && message) {
+        sessions.updateMessage(session.id, messageId, {
+          steps: message.steps?.map((step) => (step.id === stepId ? { ...step, undone: true, undoable: false } : step)),
+        });
+      }
+      toast.success('Change undone', baseName(undo.path));
+    } catch (error) {
+      toast.error('Could not undo', error);
+    }
+  }, []);
 
   const summarize = useCallback(async (title: string, path?: string, text?: string) => {
     supersede();
@@ -341,7 +644,7 @@ export function useChatEngine() {
         truncated = document.truncated;
       }
       if (!hasReadableText(content)) {
-        throw new Error(`I could not find readable text in ${title}. Scanned PDFs and images cannot be summarized yet.`);
+        throw new Error(`I could not find readable text in ${title}. Ask the agent to transcribe it with OCR first.`);
       }
       if (id !== requestRef.current) return;
       setStatus('Summarizing…');
@@ -379,7 +682,7 @@ export function useChatEngine() {
       if (options.path) {
         const document = await readCached(options.path, 20_000);
         if (!hasReadableText(document.text)) {
-          throw new Error(`${baseName(options.path)} has no extractable text. Scanned PDFs and images cannot be explained yet.`);
+          throw new Error(`${baseName(options.path)} has no extractable text. Ask the agent to transcribe it with OCR first.`);
         }
         material = attachmentBlock(baseName(options.path), document.text, document.truncated ? 'truncated' : undefined);
       } else if (options.context) {
@@ -427,11 +730,12 @@ export function useChatEngine() {
       }));
       const replay: ChatReplay | undefined = lastUser.replay;
       if (!replay) await send(lastUser.content);
+      else if (replay.kind === 'agent') await runAgentTurn(replay.text, { deep: replay.deep, preset: replay.preset }, attachmentsRef.current.filter((a) => a.enabled));
       else if (replay.kind === 'summarize') await summarize(replay.title, replay.path, replay.text);
       else if (replay.kind === 'explain') await explain(replay.topic, { context: replay.context, path: replay.path });
       else await makeFlashcards(replay);
     },
-    [send, summarize, explain, makeFlashcards],
+    [send, summarize, explain, makeFlashcards, runAgentTurn],
   );
 
   const openLesson = useCallback((topic: string, steps: string[]) => {
@@ -449,7 +753,7 @@ export function useChatEngine() {
           [
             {
               role: 'system',
-              content: `${STUDY_ASSISTANT_PROMPT}\n\nThe learner is studying a lesson about "${current.topic}". The current part is:\n\n${current.steps[current.index]}\n\nAnswer follow-up questions briefly and relate them to this part.`,
+              content: `${CHAT_PROMPT}\n\nThe learner is studying a lesson about "${current.topic}". The current part is:\n\n${current.steps[current.index]}\n\nAnswer follow-up questions briefly and relate them to this part.`,
             },
             ...thread,
           ],
@@ -481,6 +785,9 @@ export function useChatEngine() {
     cancel,
     summarize,
     explain,
+    challenge,
+    undoStep,
+    canUndo: hasUndo,
     openLesson,
     askLesson,
     makeFlashcards,

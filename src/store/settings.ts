@@ -31,12 +31,26 @@ export interface ChatLayout {
 export const TEX_ENGINES = ['auto', 'latexmk', 'xelatex', 'lualatex', 'pdflatex', 'tectonic'] as const;
 export type TexEngine = (typeof TEX_ENGINES)[number];
 
+export const REASONING_EFFORTS = ['low', 'medium', 'high'] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export interface AgentSettings {
+  enabled: boolean;
+  allowWrites: boolean;
+  confirmEdits: boolean;
+  maxSteps: number;
+  deepEffort: ReasoningEffort;
+}
+
 export interface PersistedSettings {
   theme: ThemeMode;
   primaryColor: string;
   appScale: number;
   pomodoro: PomodoroSettings;
   selectedModel: string;
+  reasoningModel: string;
+  visionModel: string;
+  agent: AgentSettings;
   sidebarExpanded: boolean;
   notificationsEnabled: boolean;
   chatLayout: ChatLayout;
@@ -62,6 +76,9 @@ export const DEFAULT_SETTINGS: PersistedSettings = {
     sound: 'beep',
   },
   selectedModel: '',
+  reasoningModel: '',
+  visionModel: '',
+  agent: { enabled: true, allowWrites: true, confirmEdits: false, maxSteps: 30, deepEffort: 'high' },
   sidebarExpanded: false,
   notificationsEnabled: true,
   chatLayout: { dockedHeight: 320, detached: false, x: 120, y: 90, width: 420, height: 560 },
@@ -79,6 +96,7 @@ interface SettingsStore extends PersistedSettings {
   update: (patch: Partial<PersistedSettings>) => void;
   updatePomodoro: (patch: Partial<PomodoroSettings>) => void;
   updateChatLayout: (patch: Partial<ChatLayout>) => void;
+  updateAgent: (patch: Partial<AgentSettings>) => void;
   setNoteDirection: (path: string, direction: 'auto' | 'rtl' | 'ltr') => void;
   moveNoteDirection: (oldPath: string, newPath: string) => void;
   touchRecent: (path: string) => void;
@@ -143,6 +161,7 @@ function sanitize(raw: unknown): PersistedSettings {
   const defaults = DEFAULT_SETTINGS;
   const legacySound = typeof data.pomodoroSound === 'string' ? data.pomodoroSound : undefined;
   const soundCandidate = (pomodoroRaw.sound as string | undefined) ?? legacySound;
+  const agentRaw = (data.agent && typeof data.agent === 'object' ? data.agent : {}) as Record<string, unknown>;
   const directionsRaw = data.noteDirections && typeof data.noteDirections === 'object' ? (data.noteDirections as Record<string, unknown>) : {};
   const noteDirections = Object.fromEntries(
     Object.entries(directionsRaw).filter((entry): entry is [string, 'rtl' | 'ltr'] => entry[1] === 'rtl' || entry[1] === 'ltr'),
@@ -169,6 +188,15 @@ function sanitize(raw: unknown): PersistedSettings {
       sound: POMODORO_SOUNDS.includes(soundCandidate as PomodoroSound) ? (soundCandidate as PomodoroSound) : defaults.pomodoro.sound,
     },
     selectedModel: text(data.selectedModel, defaults.selectedModel),
+    reasoningModel: text(data.reasoningModel, defaults.reasoningModel),
+    visionModel: text(data.visionModel, defaults.visionModel),
+    agent: {
+      enabled: bool(agentRaw.enabled, defaults.agent.enabled),
+      allowWrites: bool(agentRaw.allowWrites, defaults.agent.allowWrites),
+      confirmEdits: bool(agentRaw.confirmEdits, defaults.agent.confirmEdits),
+      maxSteps: number(agentRaw.maxSteps, defaults.agent.maxSteps, 4, 120),
+      deepEffort: REASONING_EFFORTS.includes(agentRaw.deepEffort as ReasoningEffort) ? (agentRaw.deepEffort as ReasoningEffort) : defaults.agent.deepEffort,
+    },
     sidebarExpanded: bool(data.sidebarExpanded, defaults.sidebarExpanded),
     notificationsEnabled: bool(data.notificationsEnabled, defaults.notificationsEnabled),
     chatLayout: {
@@ -195,6 +223,9 @@ function snapshot(state: SettingsStore): PersistedSettings {
     appScale: state.appScale,
     pomodoro: state.pomodoro,
     selectedModel: state.selectedModel,
+    reasoningModel: state.reasoningModel,
+    visionModel: state.visionModel,
+    agent: state.agent,
     sidebarExpanded: state.sidebarExpanded,
     notificationsEnabled: state.notificationsEnabled,
     chatLayout: state.chatLayout,
@@ -234,6 +265,7 @@ export const useSettings = create<SettingsStore>((set, get) => ({
   },
   updatePomodoro: (patch) => set((state) => ({ pomodoro: { ...state.pomodoro, ...patch } })),
   updateChatLayout: (patch) => set((state) => ({ chatLayout: { ...state.chatLayout, ...patch } })),
+  updateAgent: (patch) => set((state) => ({ agent: { ...state.agent, ...patch } })),
   setNoteDirection: (path, direction) =>
     set((state) => {
       const next = { ...state.noteDirections };

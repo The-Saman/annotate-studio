@@ -22,6 +22,7 @@ import {
   PilcrowRight,
   Play,
   Plus,
+  Presentation,
   Quote,
   Sigma,
   X,
@@ -33,6 +34,7 @@ import { useNotes } from '@/store/notes';
 import { useLibrary } from '@/store/library';
 import { activeWorkspace, useCanvas } from '@/store/canvas';
 import { useSettings } from '@/store/settings';
+import { useApp } from '@/store/app';
 import { toast } from '@/store/toast';
 import { cn, extensionOf, stripExtension, baseName } from '@/lib/utils';
 import { registerWindowKeyHandler } from '@/lib/window-keys';
@@ -259,6 +261,10 @@ function NoteWindow({ resourceId, path, title }: { resourceId: string; path: str
     }
   };
 
+  const present = () => {
+    useApp.getState().requestChat({ kind: 'walkthrough', title: stripExtension(title), markdown: previewSource });
+  };
+
   const directionIcon = direction === 'rtl' ? <PilcrowLeft size={14} /> : direction === 'ltr' ? <PilcrowRight size={14} /> : <Pilcrow size={14} />;
   const directionLabel = direction === 'rtl' ? 'Right to left' : direction === 'ltr' ? 'Left to right' : 'Automatic direction';
 
@@ -385,6 +391,9 @@ function NoteWindow({ resourceId, path, title }: { resourceId: string; path: str
         )}
         <button type="button" className={cn('tool-btn', direction !== 'auto' && 'tool-btn-active')} onClick={cycleDirection} title={`${directionLabel} (click to change)`}>
           {directionIcon}
+        </button>
+        <button type="button" className="tool-btn" onClick={present} title="Present step by step">
+          <Presentation size={14} />
         </button>
         {latex ? (
           <button type="button" className="tool-btn note-compile" onClick={() => void compile()} disabled={compiling} title="Compile to PDF">

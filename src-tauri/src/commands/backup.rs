@@ -6,8 +6,9 @@ use zip::write::SimpleFileOptions;
 
 use crate::state::{lock_error, AppState};
 
-const DATA_FILES: [&str; 9] = [
+const DATA_FILES: [&str; 10] = [
     "flashcards.json",
+    "model_info.json",
     "collections.json",
     "exams_data.json",
     "providers.json",

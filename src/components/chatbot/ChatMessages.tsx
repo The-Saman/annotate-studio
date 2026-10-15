@@ -1,11 +1,32 @@
 'use client';
 
 import React, { memo, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, BookOpenCheck, Check, Copy, FileText, Layers, RotateCcw } from 'lucide-react';
+import {
+  AlertTriangle,
+  BookOpenCheck,
+  Brain,
+  Check,
+  CheckCircle2,
+  ChevronRight,
+  Copy,
+  FileText,
+  Layers,
+  Loader2,
+  Presentation,
+  RotateCcw,
+  Swords,
+  Undo2,
+  XCircle,
+} from 'lucide-react';
 import MarkdownRenderer from '@/components/markdown/MarkdownRenderer';
-import type { ChatMessage } from '@/store/sessions';
+import FileLabel from '@/components/ui/FileLabel';
+import type { ChatMessage, ChatStep } from '@/store/sessions';
 import { useApp } from '@/store/app';
-import { copyText, cn, isRtlText } from '@/lib/utils';
+import { useLibrary } from '@/store/library';
+import { copyText, cn, baseName } from '@/lib/utils';
+import { isRtlText } from '@/lib/bidi';
+import { splitLesson } from '@/lib/ai';
+import { openFileOnCanvas } from '@/lib/workspace-actions';
 
 interface ChatMessagesProps {
   messages: ChatMessage[];
@@ -13,17 +34,86 @@ interface ChatMessagesProps {
   status: string | null;
   onRetry: (id: string) => void;
   onOpenLesson: (topic: string, steps: string[]) => void;
+  onChallenge?: (id: string) => void;
+  onUndo?: (messageId: string, stepId: string) => void;
+  canUndo?: (stepId: string) => boolean;
   emptyHint: React.ReactNode;
+}
+
+function openPath(path: string) {
+  const file = useLibrary.getState().files.find((entry) => entry.path === path);
+  if (!file) return;
+  useApp.getState().setView('canvas');
+  openFileOnCanvas(file);
+}
+
+function StepRow({ step, onUndo, canUndo }: { step: ChatStep; onUndo?: () => void; canUndo: boolean }) {
+  return (
+    <div className={cn('agent-step', `agent-step-${step.status}`)}>
+      <span className="agent-step-icon">
+        {step.status === 'running' ? <Loader2 size={12} className="spin" /> : step.status === 'error' ? <XCircle size={12} /> : <CheckCircle2 size={12} />}
+      </span>
+      <span className="agent-step-label" dir="auto">
+        {step.label}
+      </span>
+      {step.summary && !(step.paths ?? []).some((path) => baseName(path) === step.summary) && (
+        <span className="agent-step-summary" dir="auto">
+          {step.summary}
+        </span>
+      )}
+      {step.paths?.slice(0, 3).map((path) => (
+        <button key={path} type="button" className="agent-step-link" onClick={() => openPath(path)} title={`Open ${path}`}>
+          <FileText size={11} />
+          <FileLabel path={path} />
+        </button>
+      ))}
+      {step.undone ? (
+        <span className="agent-step-undone">Undone</span>
+      ) : step.undoable && canUndo && onUndo ? (
+        <button type="button" className="agent-step-undo" onClick={onUndo} title="Undo this change">
+          <Undo2 size={11} /> Undo
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function Reasoning({ text, live }: { text: string; live: boolean }) {
+  const [open, setOpen] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (open && live && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+  }, [text, open, live]);
+  return (
+    <div className={cn('agent-reasoning', open && 'agent-reasoning-open')}>
+      <button type="button" className="agent-reasoning-toggle" onClick={() => setOpen((value) => !value)}>
+        <Brain size={12} />
+        <span>{live ? 'Thinking…' : 'Thought process'}</span>
+        <ChevronRight size={12} className="agent-reasoning-chevron" />
+      </button>
+      {open && (
+        <div ref={bodyRef} className="agent-reasoning-body" dir="auto">
+          {text}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const MessageBubble = memo(function MessageBubble({
   message,
   onRetry,
   onOpenLesson,
+  onChallenge,
+  onUndo,
+  canUndo,
 }: {
   message: ChatMessage;
   onRetry: (id: string) => void;
   onOpenLesson: (topic: string, steps: string[]) => void;
+  onChallenge?: (id: string) => void;
+  onUndo?: (messageId: string, stepId: string) => void;
+  canUndo?: (stepId: string) => boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const setView = useApp((state) => state.setView);
@@ -42,7 +132,7 @@ const MessageBubble = memo(function MessageBubble({
             <div className="chat-bubble-attachments">
               {message.attachments.map((name) => (
                 <span key={name}>
-                  <FileText size={11} /> {name}
+                  <FileText size={11} /> <FileLabel path={name} />
                 </span>
               ))}
             </div>
@@ -52,15 +142,63 @@ const MessageBubble = memo(function MessageBubble({
     );
   }
 
+  const streaming = message.streaming === true;
+  const steppable = !streaming && !message.error && /^##\s+(step|گام|مرحله)/im.test(message.content);
+  const lessonSteps = steppable ? splitLesson(message.content) : [];
+
   return (
     <div className="chat-row chat-row-assistant">
-      <div className={cn('chat-bubble chat-bubble-assistant content-selectable', message.error && 'chat-bubble-error')}>
+      <div
+        className={cn(
+          'chat-bubble chat-bubble-assistant content-selectable',
+          message.error && 'chat-bubble-error',
+          message.mode === 'critique' && 'chat-bubble-critique',
+        )}
+      >
+        {(message.model || message.mode === 'deep' || message.mode === 'critique') && (
+          <div className="chat-bubble-meta">
+            {message.mode === 'deep' && (
+              <span className="chat-mode-tag">
+                <Brain size={11} /> Deep thinking
+              </span>
+            )}
+            {message.mode === 'critique' && (
+              <span className="chat-mode-tag chat-mode-critique">
+                <Swords size={11} /> Critique
+              </span>
+            )}
+            {message.model && <span className="chat-model-name">{message.model}</span>}
+          </div>
+        )}
         {message.error && (
           <div className="chat-error-title">
             <AlertTriangle size={14} /> {message.stopped ? 'Stopped' : 'Something went wrong'}
           </div>
         )}
-        <MarkdownRenderer content={message.content} />
+        {message.reasoning && <Reasoning text={message.reasoning} live={streaming && !message.content} />}
+        {message.steps && message.steps.length > 0 && (
+          <div className="agent-steps">
+            {message.steps.map((step) => (
+              <StepRow
+                key={step.id}
+                step={step}
+                canUndo={canUndo ? canUndo(step.id) : false}
+                onUndo={onUndo ? () => onUndo(message.id, step.id) : undefined}
+              />
+            ))}
+          </div>
+        )}
+        {message.content && <MarkdownRenderer content={message.content} />}
+        {streaming && (
+          <div className="chat-streaming">
+            <span className="typing-dots">
+              <i />
+              <i />
+              <i />
+            </span>
+            {message.status && <span dir="auto">{message.status}</span>}
+          </div>
+        )}
         {message.explainer && (
           <button type="button" className="chip-button chip-button-primary" onClick={() => onOpenLesson(message.explainer!.topic, message.explainer!.steps)}>
             <BookOpenCheck size={13} /> Open lesson
@@ -71,25 +209,44 @@ const MessageBubble = memo(function MessageBubble({
             <Layers size={13} /> Review in Flashcards
           </button>
         )}
-        <div className="chat-bubble-actions">
-          {message.error ? (
-            <button type="button" onClick={() => onRetry(message.id)} title="Try again">
-              <RotateCcw size={12} /> Retry
-            </button>
-          ) : (
-            <button type="button" onClick={() => void copyText(message.content).then(setCopied)} title="Copy">
-              {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy'}
-            </button>
-          )}
-        </div>
+        {!streaming && (
+          <div className="chat-bubble-actions">
+            {message.error ? (
+              <button type="button" onClick={() => onRetry(message.id)} title="Try again">
+                <RotateCcw size={12} /> Retry
+              </button>
+            ) : (
+              <>
+                <button type="button" onClick={() => void copyText(message.content).then(setCopied)} title="Copy">
+                  {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? 'Copied' : 'Copy'}
+                </button>
+                {lessonSteps.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenLesson(lessonSteps[0].split('\n')[0].replace(/^#+\s*/, '') || 'Steps', lessonSteps)}
+                    title="Go through it step by step"
+                  >
+                    <Presentation size={12} /> Step by step
+                  </button>
+                )}
+                {onChallenge && message.mode !== 'critique' && message.content.length > 40 && (
+                  <button type="button" onClick={() => onChallenge(message.id)} title="Ask the reasoning model to find weaknesses in this answer">
+                    <Swords size={12} /> Challenge
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
 });
 
-export default function ChatMessages({ messages, busy, status, onRetry, onOpenLesson, emptyHint }: ChatMessagesProps) {
+export default function ChatMessages({ messages, busy, status, onRetry, onOpenLesson, onChallenge, onUndo, canUndo, emptyHint }: ChatMessagesProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  const streamingVisible = messages.some((message) => message.streaming);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -107,9 +264,17 @@ export default function ChatMessages({ messages, busy, status, onRetry, onOpenLe
     >
       {messages.length === 0 && !busy && <div className="chat-empty">{emptyHint}</div>}
       {messages.map((message) => (
-        <MessageBubble key={message.id} message={message} onRetry={onRetry} onOpenLesson={onOpenLesson} />
+        <MessageBubble
+          key={message.id}
+          message={message}
+          onRetry={onRetry}
+          onOpenLesson={onOpenLesson}
+          onChallenge={onChallenge}
+          onUndo={onUndo}
+          canUndo={canUndo}
+        />
       ))}
-      {busy && (
+      {busy && !streamingVisible && (
         <div className="chat-row chat-row-assistant">
           <div className="chat-typing">
             <span className="typing-dots">
