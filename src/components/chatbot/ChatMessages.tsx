@@ -21,6 +21,7 @@ import {
 import MarkdownRenderer from '@/components/markdown/MarkdownRenderer';
 import FileLabel from '@/components/ui/FileLabel';
 import type { ChatMessage, ChatStep } from '@/store/sessions';
+import VisualizationView from './VisualizationView';
 import { useApp } from '@/store/app';
 import { useLibrary } from '@/store/library';
 import { copyText, cn, baseName } from '@/lib/utils';
@@ -188,7 +189,7 @@ const MessageBubble = memo(function MessageBubble({
             ))}
           </div>
         )}
-        {message.content && <MarkdownRenderer content={message.content} />}
+        {message.visualization ? <VisualizationView data={message.visualization} /> : message.content && <MarkdownRenderer content={message.content} />}
         {streaming && (
           <div className="chat-streaming">
             <span className="typing-dots">
