@@ -35,6 +35,7 @@ import {
   resourceTypeFor,
 } from '@/lib/workspace-actions';
 import { cn, formatBytes, formatRelativeTime, stripExtension } from '@/lib/utils';
+import { searchMatches } from '@/lib/bidi';
 
 type Filter = 'all' | 'pdf' | 'notes' | 'images' | 'documents';
 type Sort = 'recent' | 'modified' | 'name' | 'size';
@@ -75,8 +76,7 @@ export default function LibraryTab() {
 
   const visible = useMemo(() => {
     const types = FILTERS.find((f) => f.id === filter)?.types ?? [];
-    const needle = query.trim().toLowerCase();
-    const list = files.filter((file) => (types.length === 0 || types.includes(file.file_type)) && (!needle || file.name.toLowerCase().includes(needle)));
+    const list = files.filter((file) => (types.length === 0 || types.includes(file.file_type)) && searchMatches(file.name, query));
     return [...list].sort((a, b) => {
       switch (sort) {
         case 'name':

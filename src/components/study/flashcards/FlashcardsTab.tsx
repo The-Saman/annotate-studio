@@ -34,6 +34,7 @@ import CardEditorDialog from './CardEditorDialog';
 import GenerateDialog from './GenerateDialog';
 import ReviewSession from './ReviewSession';
 import { formatDue } from './schedule';
+import { searchMatches } from '@/lib/bidi';
 
 function CollectionItem({
   label,
@@ -144,10 +145,9 @@ export default function FlashcardsTab() {
     activeId === null ? 'All cards' : activeId === UNSORTED_ID ? 'Unsorted' : collections.find((c) => c.id === activeId)?.name ?? 'Cards';
 
   const listed = useMemo(() => {
-    const needle = query.trim().toLowerCase();
     return scoped
       .filter((card) => (filter === 'due' ? isDue(card, now) : filter === 'new' ? isNewCard(card) : true))
-      .filter((card) => !needle || card.front.toLowerCase().includes(needle) || card.back.toLowerCase().includes(needle))
+      .filter((card) => searchMatches(`${card.front}\n${card.back}`, query))
       .sort((a, b) => Date.parse(a.next_review) - Date.parse(b.next_review));
   }, [scoped, filter, query, now]);
 

@@ -14,6 +14,7 @@ import {
   Monitor,
   Palette,
   PlugZap,
+  Sigma,
   Trash2,
   Upload,
   Wifi,
@@ -22,6 +23,7 @@ import {
 import {
   addAIProvider,
   checkOllama,
+  detectTexEngines,
   exportData,
   getDataDir,
   importData,
@@ -31,19 +33,23 @@ import {
   setDefaultAIProvider,
   testAIProvider,
   type ProviderInfo,
+  type TexEngine as DetectedEngine,
 } from '@/lib/tauri-commands';
 import { flushAll } from '@/lib/persist';
 import { copyText, cn } from '@/lib/utils';
-import { THEME_IDS, useSettings, type ThemeMode } from '@/store/settings';
+import { renderMath } from '@/lib/math-render';
+import { collectMacros } from '@/lib/latex';
+import { TEX_ENGINES, THEME_IDS, useSettings, type TexEngine, type ThemeMode } from '@/store/settings';
 import { PROVIDER_LABELS, useProviders } from '@/store/providers';
 import { confirmDialog } from '@/store/dialogs';
 import { toast } from '@/store/toast';
 
-type Pane = 'appearance' | 'interface' | 'providers' | 'data' | 'shortcuts';
+type Pane = 'appearance' | 'interface' | 'writing' | 'providers' | 'data' | 'shortcuts';
 
 const PANES: { id: Pane; label: string; icon: React.ReactNode }[] = [
   { id: 'appearance', label: 'Appearance', icon: <Palette size={16} /> },
   { id: 'interface', label: 'Interface', icon: <Monitor size={16} /> },
+  { id: 'writing', label: 'Writing & math', icon: <Sigma size={16} /> },
   { id: 'providers', label: 'AI providers', icon: <Cpu size={16} /> },
   { id: 'data', label: 'Data & backup', icon: <Database size={16} /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard size={16} /> },
@@ -94,7 +100,12 @@ const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: 'Ctrl + Alt + N', action: 'New note' },
   { keys: 'V H P M T R O A E', action: 'PDF tools: select, highlight, pen, marker, text, rectangle, ellipse, arrow, eraser' },
   { keys: 'Delete', action: 'Delete selected PDF annotations' },
-  { keys: 'Ctrl + B / I / E / K', action: 'Bold, italic, code, link in notes' },
+  { keys: 'Ctrl + B / I / E / K / M', action: 'Bold, italic, code, link, math in notes' },
+  { keys: 'Ctrl + scroll in a note or PDF', action: 'Change the note text size or the PDF zoom (when Ctrl + mouse wheel zoom is on)' },
+  { keys: 'Ctrl + = / - / 0 in a note', action: 'Larger, smaller or default note text' },
+  { keys: '\\ in math', action: 'LaTeX command suggestions with a live preview' },
+  { keys: 'Ctrl + Shift + 2', action: 'Insert a zero-width non-joiner (نیم‌فاصله)' },
+  { keys: 'Double-click a formula', action: 'Open the formula enlarged' },
   { keys: 'Space, 1–4', action: 'Flip card and rate it while reviewing flashcards' },
 ];
 
@@ -266,6 +277,83 @@ function ProvidersPane() {
   );
 }
 
+const MATH_SAMPLE = 'E = \\frac{1}{4\\pi\\varepsilon_0}\\,\\frac{q_1 q_2}{r^2}';
+
+function WritingPane() {
+  const mathScale = useSettings((state) => state.mathScale);
+  const latexMacros = useSettings((state) => state.latexMacros);
+  const texEngine = useSettings((state) => state.texEngine);
+  const update = useSettings((state) => state.update);
+  const [engines, setEngines] = useState<DetectedEngine[] | null>(null);
+  const [draft, setDraft] = useState(latexMacros);
+
+  useEffect(() => {
+    detectTexEngines().then(setEngines).catch(() => setEngines([]));
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (draft !== useSettings.getState().latexMacros) update({ latexMacros: draft });
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [draft, update]);
+
+  const macroCount = Object.keys(collectMacros(draft)).length;
+  const preview = renderMath(MATH_SAMPLE, true).html;
+
+  return (
+    <div className="settings-section">
+      <h2>Writing & math</h2>
+      <div className="settings-card">
+        <h3>Formula size</h3>
+        <input type="range" min={80} max={220} step={5} value={mathScale} onChange={(event) => update({ mathScale: Number(event.target.value) })} className="range" />
+        <div className="chip-row">
+          {[100, 115, 130, 150, 175].map((value) => (
+            <button key={value} type="button" className={cn('chip', mathScale === value && 'chip-active')} onClick={() => update({ mathScale: value })}>
+              {value}%
+            </button>
+          ))}
+          <span className="muted">Current: {mathScale}%</span>
+        </div>
+        <div className="math-scale-preview md" dir="ltr">
+          <div className="md-math">
+            <div className="md-math-body" dangerouslySetInnerHTML={{ __html: preview }} />
+          </div>
+        </div>
+        <p className="muted">Double-click any formula to see it enlarged. Hold Ctrl and scroll in a note to change all of its text.</p>
+      </div>
+      <div className="settings-card">
+        <h3>LaTeX macros</h3>
+        <p className="muted">
+          Commands defined here work in every note and in the assistant’s answers, for example <code>{'\\newcommand{\\R}{\\mathbb{R}}'}</code> or <code>{'\\DeclareMathOperator{\\tr}{tr}'}</code>. Notes can also define their own.
+        </p>
+        <textarea className="input mono macro-editor" value={draft} onChange={(event) => setDraft(event.target.value)} rows={6} spellCheck={false} dir="ltr" placeholder={'\\newcommand{\\R}{\\mathbb{R}}\n\\newcommand{\\vect}[1]{\\mathbf{#1}}'} />
+        <span className="muted">{macroCount === 1 ? '1 macro defined' : `${macroCount} macros defined`}</span>
+      </div>
+      <div className="settings-card">
+        <h3>LaTeX compiler</h3>
+        <p className="muted">LaTeX notes (.tex) preview instantly. To compile them to PDF, Annotate Studio uses a TeX distribution installed on this computer (TeX Live, MiKTeX or Tectonic). Persian documents with xepersian need XeLaTeX.</p>
+        <div className="form-grid form-grid-2">
+          <label className="field">
+            <span className="field-label">Engine</span>
+            <select className="input" value={texEngine} onChange={(event) => update({ texEngine: event.target.value as TexEngine })}>
+              {TEX_ENGINES.map((engine) => (
+                <option key={engine} value={engine}>
+                  {engine === 'auto' ? 'Automatic' : engine}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className={cn('status-row', engines && engines.length > 0 ? 'status-ok' : 'status-off')}>
+          {engines === null ? <Loader2 size={14} className="spin" /> : engines.length > 0 ? <CheckCircle2 size={14} /> : <WifiOff size={14} />}
+          {engines === null ? 'Looking for TeX…' : engines.length > 0 ? `Found: ${engines.map((engine) => engine.name).join(', ')}` : 'No TeX distribution was found'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DataPane() {
   const [dataDir, setDataDir] = useState('');
   const [busy, setBusy] = useState<'export' | 'import' | null>(null);
@@ -357,6 +445,7 @@ export default function SettingsTab() {
   const primaryColor = useSettings((state) => state.primaryColor);
   const appScale = useSettings((state) => state.appScale);
   const notificationsEnabled = useSettings((state) => state.notificationsEnabled);
+  const ctrlWheelZoom = useSettings((state) => state.ctrlWheelZoom);
   const update = useSettings((state) => state.update);
   const scales = useMemo(() => [90, 100, 110, 125, 150], []);
 
@@ -443,6 +532,14 @@ export default function SettingsTab() {
               </div>
             </div>
             <div className="settings-card">
+              <h3>Ctrl + mouse wheel zoom</h3>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={ctrlWheelZoom} onChange={(event) => update({ ctrlWheelZoom: event.target.checked })} />
+                Hold Ctrl and scroll over a note or PDF to change its text size or zoom
+              </label>
+              <p className="muted">When this is off, Ctrl + scroll always zooms the canvas. Ctrl + = and Ctrl + - also work in notes.</p>
+            </div>
+            <div className="settings-card">
               <h3>Notifications</h3>
               <label className="checkbox-row">
                 <input type="checkbox" checked={notificationsEnabled} onChange={(event) => update({ notificationsEnabled: event.target.checked })} />
@@ -452,6 +549,7 @@ export default function SettingsTab() {
           </div>
         )}
 
+        {pane === 'writing' && <WritingPane />}
         {pane === 'providers' && <ProvidersPane />}
         {pane === 'data' && <DataPane />}
 

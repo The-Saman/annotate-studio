@@ -59,6 +59,7 @@ import { copyText, cn, isEditableTarget, stripExtension } from '@/lib/utils';
 import { activeWorkspace, useCanvas } from '@/store/canvas';
 import { useApp } from '@/store/app';
 import { useLibrary } from '@/store/library';
+import { useSettings } from '@/store/settings';
 import { toast } from '@/store/toast';
 
 type Tool = 'select' | 'highlight' | 'pen' | 'marker' | 'text' | 'rectangle' | 'circle' | 'arrow' | 'eraser';
@@ -129,6 +130,7 @@ function PdfWindow({ resourceId, path, title, active }: PdfWindowProps) {
   const [engine, setEngine] = useState<SharedPdfEngine | null>(null);
   const [bytes, setBytes] = useState<ArrayBuffer | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const revision = useLibrary((state) => state.revisions[path] ?? 0);
   const plugins = usePdfPlugins();
 
   useEffect(() => {
@@ -155,7 +157,7 @@ function PdfWindow({ resourceId, path, title, active }: PdfWindowProps) {
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [path, revision]);
 
   if (error) {
     return (
@@ -174,7 +176,7 @@ function PdfWindow({ resourceId, path, title, active }: PdfWindowProps) {
     );
   }
   return (
-    <EmbedPDF engine={engine} plugins={plugins} autoMountDomElements={false}>
+    <EmbedPDF key={revision} engine={engine} plugins={plugins} autoMountDomElements={false}>
       <PdfDocument resourceId={resourceId} path={path} title={title} active={active} bytes={bytes} />
     </EmbedPDF>
   );
@@ -607,7 +609,7 @@ function PdfWorkspace({ documentId, resourceId, path, title, active }: Omit<PdfW
     const element = viewportRef.current;
     if (!element) return;
     const onWheel = (event: WheelEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
+      if (!(event.ctrlKey || event.metaKey) || !useSettings.getState().ctrlWheelZoom) return;
       const windowElement = element.closest('[data-window-id]');
       if (!maximized && windowElement?.getAttribute('data-active') !== 'true') return;
       event.preventDefault();

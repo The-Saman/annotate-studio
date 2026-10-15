@@ -22,6 +22,8 @@
   --pdf-bg: #e7eaef;
   --code-bg: #f3f5f8;
   --code-text: #be185d;
+  --math-text: #6d28d9;
+  --math-mark: #a855f7;
   --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
   --shadow-md: 0 4px 14px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.06);
   --shadow-lg: 0 18px 50px rgba(15, 23, 42, 0.16), 0 4px 12px rgba(15, 23, 42, 0.08);
@@ -66,6 +68,8 @@
   --grid-dot: rgba(255, 255, 255, 0.09);
   --pdf-bg: #1c1c21;
   --code-bg: #1f1f25;
+  --math-text: #c4b5fd;
+  --math-mark: #d8b4fe;
   --code-text: #f9a8d4;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.45);
@@ -1945,6 +1949,7 @@ input[type='checkbox'] {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+  text-align: left;
 }
 
 .cw-actions {
@@ -2321,6 +2326,97 @@ input[type='checkbox'] {
   background: var(--bg-card);
 }
 
+.note-preview-pane .md {
+  font-size: calc(14.5px * var(--note-zoom, 1));
+}
+
+.note-zoom-chip {
+  height: 22px;
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary);
+  background: var(--primary-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.note-zoom-chip:hover {
+  background: var(--primary-soft-strong);
+}
+
+.formula-overlay {
+  z-index: 1300;
+}
+
+.formula-viewer {
+  width: min(1100px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  animation: pop-in 0.16s ease-out;
+  overflow: hidden;
+}
+
+.formula-viewer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.formula-viewer-scale {
+  min-width: 44px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.formula-viewer-spacer {
+  flex: 1;
+}
+
+.formula-viewer-body {
+  flex: 1;
+  min-height: 160px;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: 32px 28px;
+  color: var(--text-primary);
+}
+
+.formula-viewer-body .katex-display {
+  margin: 0;
+}
+
+.formula-viewer-error {
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--danger);
+  border-top: 1px solid var(--border);
+}
+
+.formula-viewer-source {
+  margin: 0;
+  padding: 10px 14px;
+  max-height: 140px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  white-space: pre-wrap;
+}
+
 .note-empty {
   color: var(--text-muted);
   font-size: 13px;
@@ -2458,7 +2554,11 @@ input[type='checkbox'] {
 .md ul,
 .md ol {
   margin: 0 0 0.75em;
-  padding-inline-start: 1.5em;
+  padding-inline-start: 0;
+}
+
+.md ol.md-ol-persian {
+  list-style-type: persian;
 }
 
 .md ul {
@@ -2478,7 +2578,8 @@ input[type='checkbox'] {
 }
 
 .md li {
-  margin: 0.2em 0;
+  margin-block: 0.2em;
+  margin-inline: 1.5em 0;
 }
 
 .md li::marker {
@@ -2499,11 +2600,12 @@ input[type='checkbox'] {
 }
 
 .md .md-task-list {
-  padding-inline-start: 0.3em;
+  padding-inline-start: 0;
 }
 
 .md li.md-task {
   list-style: none;
+  margin-inline-start: 0.3em;
 }
 
 .md-task-line {
@@ -2533,7 +2635,8 @@ input[type='checkbox'] {
   border-inline-start: 3px solid var(--primary-border);
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--primary) 4%, transparent);
-  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  border-start-end-radius: var(--radius-xs);
+  border-end-end-radius: var(--radius-xs);
 }
 
 .md hr {
@@ -2550,6 +2653,11 @@ input[type='checkbox'] {
   border-radius: 5px;
   background: var(--code-bg);
   color: var(--code-text);
+  unicode-bidi: isolate;
+}
+
+.md-math-error {
+  color: var(--danger);
 }
 
 .md-code {
@@ -2597,10 +2705,301 @@ input[type='checkbox'] {
 }
 
 .md-math {
+  position: relative;
   margin: 0.4em 0 0.9em;
+  padding: 4px 0;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease;
+}
+
+.md-math-body {
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 4px 0;
+  padding: 2px 4px;
+}
+
+.md-math:hover {
+  background: color-mix(in srgb, var(--primary) 4%, transparent);
+}
+
+.md-math-zoom {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.md-math:hover .md-math-zoom,
+.md-math-zoom:focus-visible {
+  opacity: 1;
+}
+
+.md-math-zoom:hover {
+  color: var(--primary);
+  border-color: var(--primary-border);
+}
+
+.md-math-inline {
+  unicode-bidi: isolate;
+  cursor: zoom-in;
+}
+
+.md-math-has-error .katex {
+  outline: 1px dashed color-mix(in srgb, var(--danger) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.md-mark {
+  padding: 0.05em 0.2em;
+  border-radius: 4px;
+  color: inherit;
+  background: color-mix(in srgb, #facc15 42%, transparent);
+}
+
+.md-ref,
+.md-footnote-ref a {
+  color: var(--primary);
+  text-decoration: none;
+  cursor: pointer;
+  unicode-bidi: isolate;
+}
+
+.md-ref:hover,
+.md-footnote-ref a:hover {
+  text-decoration: underline;
+}
+
+.md-ref-missing {
+  color: var(--danger);
+}
+
+.md-footnote-ref {
+  font-size: 0.72em;
+  line-height: 0;
+  margin-inline-start: 1px;
+}
+
+.md-cite {
+  color: var(--text-secondary);
+  unicode-bidi: isolate;
+}
+
+.md-footnotes {
+  margin-top: 1.6em;
+  padding-top: 0.8em;
+  border-top: 1px solid var(--border);
+  font-size: 0.88em;
+  color: var(--text-secondary);
+}
+
+.md-footnotes ol {
+  list-style: decimal;
+  margin: 0;
+}
+
+.md-footnotes ol.md-ol-persian {
+  list-style-type: persian;
+}
+
+.md-flash {
+  animation: md-flash 1.4s ease-out;
+}
+
+@keyframes md-flash {
+  0%,
+  35% {
+    background: color-mix(in srgb, var(--primary) 16%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.md-env {
+  margin: 0.4em 0 0.9em;
+  padding: 10px 14px;
+  border-inline-start: 3px solid color-mix(in srgb, var(--env-tone, var(--primary)) 70%, var(--border));
+  background: color-mix(in srgb, var(--env-tone, var(--primary)) 5%, transparent);
+  border-start-end-radius: var(--radius-sm);
+  border-end-end-radius: var(--radius-sm);
+}
+
+.md-env > :last-child {
+  margin-bottom: 0;
+}
+
+.md-env > .md-env-head + p {
+  display: inline;
+}
+
+.md-env > .md-env-head + p + * {
+  margin-top: 0.6em;
+}
+
+.md-env-head {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.md-env-title {
+  font-weight: 600;
+}
+
+.md-env-theorem,
+.md-env-lemma,
+.md-env-proposition,
+.md-env-corollary,
+.md-env-claim,
+.md-env-conjecture,
+.md-env-axiom {
+  --env-tone: #7c3aed;
+}
+
+.md-env-theorem > p,
+.md-env-lemma > p,
+.md-env-proposition > p,
+.md-env-corollary > p {
+  font-style: italic;
+}
+
+.md-env-theorem[dir='rtl'] > p,
+.md-env-lemma[dir='rtl'] > p,
+.md-env-proposition[dir='rtl'] > p,
+.md-env-corollary[dir='rtl'] > p {
+  font-style: normal;
+}
+
+.md-env-definition {
+  --env-tone: #0d9488;
+}
+
+.md-env-example,
+.md-env-exercise,
+.md-env-problem,
+.md-env-question {
+  --env-tone: #ea580c;
+}
+
+.md-env-remark,
+.md-env-note,
+.md-env-hint,
+.md-env-answer,
+.md-env-solution {
+  --env-tone: #0284c7;
+}
+
+.md-env-proof {
+  --env-tone: var(--text-muted);
+  background: transparent;
+}
+
+.md-env-proof .md-env-head {
+  font-style: italic;
+  font-weight: 650;
+}
+
+.md-qed {
+  display: block;
+  text-align: end;
+  color: var(--text-secondary);
+  line-height: 1;
+  margin-top: -0.2em;
+}
+
+.md-callout {
+  --tone: #2563eb;
+  margin: 0.4em 0 0.9em;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--tone) 28%, var(--border));
+  background: color-mix(in srgb, var(--tone) 6%, var(--bg-card));
+  overflow: hidden;
+}
+
+.md-callout-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-weight: 650;
+  color: color-mix(in srgb, var(--tone) 80%, var(--text-primary));
+}
+
+.md-callout-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.md-callout-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.md-callout-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.md-callout-chevron {
+  transition: transform 0.15s ease;
+  transform: rotate(90deg);
+}
+
+.md-callout-closed .md-callout-chevron {
+  transform: rotate(0deg);
+}
+
+.md-callout[dir='rtl'].md-callout-closed .md-callout-chevron {
+  transform: rotate(180deg);
+}
+
+.md-callout-body {
+  padding: 0 14px 10px;
+}
+
+.md-callout-body > :last-child {
+  margin-bottom: 0;
+}
+
+.md-tone-blue {
+  --tone: #2563eb;
+}
+
+.md-tone-teal {
+  --tone: #0d9488;
+}
+
+.md-tone-green {
+  --tone: #16a34a;
+}
+
+.md-tone-amber {
+  --tone: #ca8a04;
+}
+
+.md-tone-orange {
+  --tone: #ea580c;
+}
+
+.md-tone-red {
+  --tone: #dc2626;
+}
+
+.md-tone-violet {
+  --tone: #7c3aed;
+}
+
+.md-tone-gray {
+  --tone: #64748b;
 }
 
 .md-wikilink {
@@ -2671,7 +3070,11 @@ input[type='checkbox'] {
 }
 
 .md .katex {
-  font-size: 1.08em;
+  font-size: calc(1.08em * var(--math-scale, 1.15));
+}
+
+.md .md-math .katex {
+  font-size: calc(1.14em * var(--math-scale, 1.15));
 }
 
 .chat-dock {
@@ -4718,4 +5121,109 @@ input[type='checkbox'] {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+.note-compile {
+  width: auto;
+  gap: 4px;
+  padding: 0 7px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--primary);
+}
+
+.note-issues {
+  flex-shrink: 0;
+  max-height: 140px;
+  overflow: auto;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--danger) 6%, var(--bg-card));
+  font-size: 12px;
+}
+
+.note-issues-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 2px 10px;
+  font-weight: 650;
+  color: var(--danger);
+}
+
+.note-issues-head span {
+  flex: 1;
+}
+
+.note-issues ul {
+  list-style: none;
+  margin: 0;
+  padding: 0 10px 6px;
+}
+
+.note-issues li {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  color: var(--text-secondary);
+}
+
+.note-issues li button {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--primary);
+}
+
+.cm-math-preview {
+  max-width: min(720px, 80vw);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-card) !important;
+  box-shadow: var(--shadow-md);
+  color: var(--text-primary);
+  overflow-x: auto;
+}
+
+.cm-math-preview-body .katex {
+  font-size: calc(1.15em * var(--math-scale, 1.15));
+}
+
+.cm-math-preview-body .katex-display {
+  margin: 0.2em 0;
+}
+
+.cm-math-preview-error {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--danger);
+  font-family: var(--font-sans);
+}
+
+.cm-latex-info {
+  padding: 6px 10px;
+  font-size: 15px;
+  color: var(--text-primary);
+}
+
+.cm-tooltip.cm-tooltip-autocomplete-disabled,
+.cm-tooltip-info {
+  border-radius: var(--radius-sm) !important;
+  border: 1px solid var(--border) !important;
+  background: var(--bg-card) !important;
+}
+
+.math-scale-preview {
+  margin-top: 10px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+
+.macro-editor {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  font-size: 12.5px;
+  line-height: 1.55;
 }

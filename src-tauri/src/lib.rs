@@ -9,7 +9,7 @@ pub mod state;
 pub mod storage;
 pub mod text;
 
-use commands::{ai, backup, data, files, flashcards};
+use commands::{ai, backup, data, files, flashcards, latex};
 use paths::Workspace;
 use state::AppState;
 use tauri::Manager;
@@ -83,6 +83,8 @@ pub fn run() {
             ai::set_default_ai_provider,
             ai::test_ai_provider,
             ai::check_ollama,
+            latex::detect_tex_engines,
+            latex::compile_latex,
             backup::export_data,
             backup::import_data,
         ])

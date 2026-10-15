@@ -141,7 +141,8 @@ export interface NoteText {
 
 export const readNote = (path: string) => call<NoteText>('read_note', { path });
 export const writeTextFile = (path: string, content: string) => call<StudyFile>('write_text_file', { path, content });
-export const createNote = (name: string, content: string) => call<StudyFile>('create_note', { name, content });
+export const createNote = (name: string, content: string, extension?: string) =>
+  call<StudyFile>('create_note', { name, content, extension: extension ?? null });
 export const renameWorkspaceFile = (path: string, newName: string) =>
   call<StudyFile>('rename_workspace_file', { path, newName });
 export const deleteWorkspaceFile = (path: string) => call<void>('delete_workspace_file', { path });
@@ -256,6 +257,27 @@ export const setDefaultAIProvider = (providerType: string, model?: string) =>
   call<ProviderInfo[]>('set_default_ai_provider', { providerType, model: model ?? null });
 export const testAIProvider = (model?: string) => call<AIResponse>('test_ai_provider', { model: model || null });
 export const checkOllama = (endpoint?: string) => call<boolean>('check_ollama', { endpoint: endpoint || null });
+
+export interface TexEngine {
+  name: string;
+  path: string;
+}
+
+export interface CompileIssue {
+  line: number | null;
+  message: string;
+}
+
+export interface CompileResult {
+  success: boolean;
+  engine: string;
+  pdf: StudyFile | null;
+  log: string;
+  issues: CompileIssue[];
+}
+
+export const detectTexEngines = () => call<TexEngine[]>('detect_tex_engines');
+export const compileLatex = (path: string, engine?: string) => call<CompileResult>('compile_latex', { path, engine: engine && engine !== 'auto' ? engine : null });
 
 export const exportData = (outputPath: string) => call<number>('export_data', { outputPath });
 export const importData = (archivePath: string) => call<number>('import_data', { archivePath });
